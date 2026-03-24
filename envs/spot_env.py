@@ -10,11 +10,11 @@ MDP Formulation:
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
-from typing import Dict, Tuple, Any
+from typing import Dict, List, Tuple, Any
 import pandas as pd
 
 from envs.market_simulator import SpotMarketSimulator
-from envs.workload_generator import WorkloadGenerator
+from envs.workload_generator import WorkloadGenerator, Job
 from envs.cost_calculator import CostCalculator
 
 
@@ -23,18 +23,19 @@ class SpotInstanceEnv(gym.Env):
     Spot Instance Optimization Environment.
 
     Observation (15 features):
-        [price, price_ma_1h, price_ma_24h, volatility, interr_prob,
+        [price, price_ma_6h, price_ma_24h, volatility, interr_prob,
          spot_instances, ondemand_instances, total_capacity,
          pending_jobs, running_jobs, workload_forecast, queue_wait_time,
          hour_of_day, day_of_week, progress]
 
-    Actions (6 discrete):
+    Actions (7 discrete):
         0: REQUEST_SPOT
         1: REQUEST_ONDEMAND
         2: TERMINATE_SPOT
         3: TERMINATE_ONDEMAND
         4: MIGRATE_TO_ONDEMAND
-        5: DO_NOTHING
+        5: MIGRATE_TO_SPOT
+        6: DO_NOTHING
     """
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
@@ -45,11 +46,13 @@ class SpotInstanceEnv(gym.Env):
     ACTION_TERMINATE_SPOT = 2
     ACTION_TERMINATE_ONDEMAND = 3
     ACTION_MIGRATE_TO_ONDEMAND = 4
-    ACTION_DO_NOTHING = 5
+    ACTION_MIGRATE_TO_SPOT = 5
+    ACTION_DO_NOTHING = 6
 
     ACTION_NAMES = [
         "REQUEST_SPOT", "REQUEST_ONDEMAND", "TERMINATE_SPOT",
-        "TERMINATE_ONDEMAND", "MIGRATE_TO_ONDEMAND", "DO_NOTHING",
+        "TERMINATE_ONDEMAND", "MIGRATE_TO_ONDEMAND", "MIGRATE_TO_SPOT",
+        "DO_NOTHING",
     ]
 
     def __init__(
@@ -129,16 +132,53 @@ class SpotInstanceEnv(gym.Env):
             migration_cost=cost_config.get('migration_cost', CostCalculator.MIGRATION_COST),
         )
 
-        # Define action space (6 discrete actions)
-        self.action_space = spaces.Discrete(6)
+        # Define action space (7 discrete actions)
+        self.action_space = spaces.Discrete(7)
 
-        # Define observation space (15 features)
+        # Define observation space (15 features, normalized to [0, 1])
         self.observation_space = spaces.Box(
-            low=-np.inf,
-            high=np.inf,
+            low=0.0,
+            high=1.0,
             shape=(15,),
             dtype=np.float32,
         )
+
+        # Normalization bounds for state features (min-max scaling to [0, 1])
+        self._obs_min = np.array([
+            0.0,    # current_price
+            0.0,    # mean_6h
+            0.0,    # mean_24h
+            0.0,    # volatility
+            0.0,    # interruption_prob
+            0.0,    # spot_instances
+            0.0,    # ondemand_instances
+            0.0,    # total_capacity
+            0.0,    # pending_jobs
+            0.0,    # running_jobs
+            0.0,    # workload_forecast
+            0.0,    # avg_wait
+            0.0,    # hour_of_day
+            0.0,    # day_of_week
+            0.0,    # progress
+        ], dtype=np.float32)
+
+        self._obs_max = np.array([
+            0.20,                           # current_price (spot rarely > $0.20)
+            0.20,                           # mean_6h
+            0.20,                           # mean_24h
+            0.05,                           # volatility
+            1.0,                            # interruption_prob
+            float(spot_capacity),           # spot_instances
+            float(ondemand_capacity),       # ondemand_instances
+            float(spot_capacity + ondemand_capacity),  # total_capacity
+            100.0,                          # pending_jobs (tăng từ 50 vì peak hours tích lũy nhanh)
+            float(spot_capacity + ondemand_capacity),  # running_jobs
+            100.0,                          # workload_forecast
+            100.0,                          # avg_wait (tăng từ 50 vì tích lũy theo thời gian)
+            23.0,                           # hour_of_day
+            6.0,                            # day_of_week
+            1.0,                            # progress
+        ], dtype=np.float32)
 
         # Internal state
         self._reset_state()
@@ -152,15 +192,17 @@ class SpotInstanceEnv(gym.Env):
         self.num_spot_instances = 0
         self.num_ondemand_instances = 0
         self.pending_jobs = 0
+        self.running_jobs_list: List[Job] = []  # Jobs currently executing
         self.running_jobs = 0
         self.completed_jobs = 0
         self.failed_jobs = 0
         self.total_cost = 0.0
         self.step_cost = 0.0
         self.num_migrations = 0
+        self.num_migrations_to_spot = 0
         self.num_interruptions = 0
         self.queue_wait_accumulator = 0.0
-        self.action_counts = np.zeros(6, dtype=int)
+        self.action_counts = np.zeros(7, dtype=int)
 
     def reset(
         self, seed: int = None, options: Dict[str, Any] = None
@@ -189,7 +231,10 @@ class SpotInstanceEnv(gym.Env):
 
         # Reset per-step counters BEFORE action (migration counter set by action)
         self.num_migrations = 0
+        self.num_migrations_to_spot = 0
         self.num_interruptions = 0
+        self.step_failed_jobs = 0
+        self.step_completed_jobs = 0
 
         # 1. Execute action
         self._execute_action(action)
@@ -229,30 +274,40 @@ class SpotInstanceEnv(gym.Env):
 
         return observation, reward, terminated, truncated, info
 
+    # Số instance thay đổi mỗi action (cho agent scale nhanh hơn)
+    SCALE_STEP = 3
+
     def _execute_action(self, action: int):
         """Execute the selected action."""
         if action == self.ACTION_REQUEST_SPOT:
-            if self.num_spot_instances < self.spot_capacity:
-                self.num_spot_instances += 1
+            add = min(self.SCALE_STEP, self.spot_capacity - self.num_spot_instances)
+            self.num_spot_instances += add
 
         elif action == self.ACTION_REQUEST_ONDEMAND:
-            if self.num_ondemand_instances < self.ondemand_capacity:
-                self.num_ondemand_instances += 1
+            add = min(self.SCALE_STEP, self.ondemand_capacity - self.num_ondemand_instances)
+            self.num_ondemand_instances += add
 
         elif action == self.ACTION_TERMINATE_SPOT:
-            if self.num_spot_instances > 0:
-                self.num_spot_instances -= 1
+            remove = min(self.SCALE_STEP, self.num_spot_instances)
+            self.num_spot_instances -= remove
 
         elif action == self.ACTION_TERMINATE_ONDEMAND:
-            if self.num_ondemand_instances > 0:
-                self.num_ondemand_instances -= 1
+            remove = min(self.SCALE_STEP, self.num_ondemand_instances)
+            self.num_ondemand_instances -= remove
 
         elif action == self.ACTION_MIGRATE_TO_ONDEMAND:
-            if (self.num_spot_instances > 0
-                    and self.num_ondemand_instances < self.ondemand_capacity):
-                self.num_spot_instances -= 1
-                self.num_ondemand_instances += 1
-                self.num_migrations += 1
+            migrate = min(self.SCALE_STEP, self.num_spot_instances,
+                          self.ondemand_capacity - self.num_ondemand_instances)
+            self.num_spot_instances -= migrate
+            self.num_ondemand_instances += migrate
+            self.num_migrations += migrate
+
+        elif action == self.ACTION_MIGRATE_TO_SPOT:
+            migrate = min(self.SCALE_STEP, self.num_ondemand_instances,
+                          self.spot_capacity - self.num_spot_instances)
+            self.num_ondemand_instances -= migrate
+            self.num_spot_instances += migrate
+            self.num_migrations_to_spot += migrate
 
         elif action == self.ACTION_DO_NOTHING:
             pass
@@ -262,32 +317,55 @@ class SpotInstanceEnv(gym.Env):
         # 1. Step market simulator
         price, interr_prob, interrupted = self.market_sim.step()
 
-        # 2. Handle spot interruptions
+        # 2. Handle spot interruptions — kill running jobs on lost instances
         if interrupted and self.num_spot_instances > 0:
             self.num_spot_instances -= 1
             self.num_interruptions += 1
+            # Kill one running job that was on the interrupted spot instance
+            if self.running_jobs_list:
+                self.running_jobs_list.pop()
+                self.failed_jobs += 1
+                self.step_failed_jobs += 1
 
         # 3. Generate new jobs
         new_jobs = self.workload_gen.step()
         self.pending_jobs += len(new_jobs)
 
-        # 4. Job execution
+        # 4. Tick running jobs — decrement remaining time, complete finished ones
+        still_running: List[Job] = []
+        for job in self.running_jobs_list:
+            job.remaining_time -= 1
+            if job.remaining_time <= 0:
+                self.completed_jobs += 1
+                self.step_completed_jobs += 1
+            else:
+                still_running.append(job)
+        self.running_jobs_list = still_running
+
+        # 5. Schedule new jobs onto free capacity
         total_capacity = self.num_spot_instances + self.num_ondemand_instances
+        free_slots = total_capacity - len(self.running_jobs_list)
 
-        if total_capacity > 0 and self.pending_jobs > 0:
-            jobs_to_execute = min(self.pending_jobs, total_capacity)
-            self.pending_jobs -= jobs_to_execute
-            self.running_jobs = jobs_to_execute
-            self.completed_jobs += jobs_to_execute
-            self.running_jobs = 0
+        if free_slots > 0 and self.pending_jobs > 0:
+            jobs_to_start = min(self.pending_jobs, free_slots)
+            # Pull jobs from the pending queue into running
+            started = self.workload_gen.pending_jobs[:jobs_to_start]
+            self.workload_gen.pending_jobs = self.workload_gen.pending_jobs[jobs_to_start:]
+            self.running_jobs_list.extend(started)
+            self.pending_jobs -= jobs_to_start
 
-        # 5. SLA: jobs waiting too long fail
+        self.running_jobs = len(self.running_jobs_list)
+
+        # 6. SLA: jobs waiting too long fail (deadline exceeded)
         if self.pending_jobs > total_capacity * 3 and self.pending_jobs > 0:
             jobs_failed = max(1, self.pending_jobs // 10)
             self.pending_jobs -= jobs_failed
+            # Also remove from workload generator's pending list
+            self.workload_gen.pending_jobs = self.workload_gen.pending_jobs[:-jobs_failed] if jobs_failed <= len(self.workload_gen.pending_jobs) else []
             self.failed_jobs += jobs_failed
+            self.step_failed_jobs += jobs_failed
 
-        # 6. Track queue wait time
+        # 7. Track queue wait time
         self.queue_wait_accumulator += self.pending_jobs
 
     def _calculate_reward(self) -> float:
@@ -301,23 +379,28 @@ class SpotInstanceEnv(gym.Env):
         self.step_cost = step_cost
         self.total_cost += step_cost
 
-        total_capacity = self.num_spot_instances + self.num_ondemand_instances
+        # Savings so với baseline: nếu chạy toàn bộ running + pending jobs
+        # bằng on-demand thì tốn bao nhiêu?
+        jobs_needing_capacity = self.running_jobs + self.pending_jobs
+        baseline_capacity = max(jobs_needing_capacity,
+                                self.num_spot_instances + self.num_ondemand_instances)
         savings = self.cost_calc.compute_savings_vs_ondemand(
             actual_cost=step_cost,
-            total_capacity=total_capacity,
+            total_capacity=baseline_capacity,
             timestep_duration=1.0,
         )
 
-        total_jobs = self.completed_jobs + self.failed_jobs
+        # SLA penalty: dùng số job thực tế trong step này
+        step_total_jobs = self.step_failed_jobs + self.step_completed_jobs
         sla_penalty = self.cost_calc.compute_sla_penalty(
-            failed_jobs=self.failed_jobs,
-            total_jobs=total_jobs,
+            failed_jobs=self.step_failed_jobs,
+            total_jobs=step_total_jobs,
             sla_threshold=self.sla_threshold,
         )
 
         migration_penalty = self.cost_calc.compute_migration_penalty(
             num_migrations=self.num_migrations,
-        )
+        ) + self.num_migrations_to_spot * self.cost_calc.migration_cost_to_spot
 
         interruption_penalty = self.cost_calc.compute_interruption_penalty(
             num_interruptions=self.num_interruptions,
@@ -331,7 +414,10 @@ class SpotInstanceEnv(gym.Env):
             interruption_penalty=interruption_penalty,
         )
 
-        return reward
+        # Phạt thêm cho pending jobs cao (khuyến khích agent giữ queue thấp)
+        pending_penalty = self.pending_jobs * 0.1
+
+        return reward - pending_penalty
 
     def _get_observation(self) -> np.ndarray:
         """Build state vector from current state."""
@@ -342,9 +428,9 @@ class SpotInstanceEnv(gym.Env):
         day_of_week = (self.current_step // 24) % 7
         avg_wait = self.queue_wait_accumulator / max(1, self.current_step)
 
-        obs = np.array([
+        raw = np.array([
             self.market_sim.current_price,
-            price_stats['mean_1h'],
+            price_stats['mean_6h'],
             price_stats['mean_24h'],
             price_stats['volatility'],
             self.market_sim.interruption_prob,
@@ -359,6 +445,11 @@ class SpotInstanceEnv(gym.Env):
             float(day_of_week),
             self.current_step / self.max_steps,
         ], dtype=np.float32)
+
+        # Min-max normalize to [0, 1]
+        denom = self._obs_max - self._obs_min
+        denom = np.where(denom == 0, 1.0, denom)  # avoid division by zero
+        obs = np.clip((raw - self._obs_min) / denom, 0.0, 1.0)
 
         return obs
 

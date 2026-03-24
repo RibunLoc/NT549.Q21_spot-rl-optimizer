@@ -113,13 +113,13 @@ def plot_action_distribution(
     if action_names is None:
         action_names = [
             "Req Spot", "Req OnDemand", "Term Spot",
-            "Term OnDemand", "Migrate", "Do Nothing",
+            "Term OnDemand", "Migrate→OD", "Migrate→Spot", "Do Nothing",
         ]
 
     total = action_counts.sum()
     percentages = action_counts / total * 100 if total > 0 else action_counts
 
-    colors = ['#2196F3', '#FF9800', '#F44336', '#E91E63', '#9C27B0', '#607D8B']
+    colors = ['#2196F3', '#FF9800', '#F44336', '#E91E63', '#9C27B0', '#00BCD4', '#607D8B']
 
     fig, ax = plt.subplots(figsize=(10, 6))
     bars = ax.bar(action_names, percentages, color=colors, edgecolor='white', linewidth=1.5)

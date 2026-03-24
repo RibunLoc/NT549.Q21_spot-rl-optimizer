@@ -1,7 +1,7 @@
 # Quick test DQN configuration (uses raw CSV data)
 
 env:
-  data_path: "data/raw/spot_prices/spot_prices_ap-southeast-1_stable.csv"
+  data_path: "data/processed/price_features_stable.pkl"
   max_steps: 200
   sla_threshold: 0.95
   spot_capacity: 10

@@ -1,7 +1,7 @@
 """
-Cost calculator for spot and on-demand instances.
+Bộ tính chi phí cho spot và on-demand instance.
 
-Computes costs, savings, and SLA penalties.
+Tính toán chi phí, tiết kiệm, và các khoản phạt SLA.
 """
 
 from typing import Dict
@@ -9,23 +9,24 @@ from typing import Dict
 
 class CostCalculator:
     """
-    Calculates costs and penalties for the environment.
+    Tính toán chi phí và các khoản phạt cho môi trường.
 
-    TODO: Implement cost calculation logic:
-    - Spot vs on-demand pricing
-    - SLA penalties for failed jobs
-    - Migration costs
-    - Startup/teardown costs
+    TODO: Cài đặt logic tính chi phí:
+    - So sánh giá Spot vs On-demand
+    - Phạt SLA cho các job thất bại
+    - Chi phí migration
+    - Chi phí khởi động/dừng instance
     """
 
-    # AWS EC2 pricing (example for m5.large in us-east-1)
-    ONDEMAND_PRICE_PER_HOUR = 0.096  # $/hour
-    SPOT_PRICE_REFERENCE = 0.030  # $/hour (average spot price)
+    # Bảng giá AWS EC2 (ví dụ cho m5.large tại us-east-1)
+    ONDEMAND_PRICE_PER_HOUR = 0.096  # $/giờ
+    SPOT_PRICE_REFERENCE = 0.030  # $/giờ (giá spot trung bình)
 
-    # Penalty parameters
-    SLA_PENALTY_PER_FAILED_JOB = 10.0  # $ per failed job
-    MIGRATION_COST = 1.0  # $ per migration (downtime cost)
-    INTERRUPTION_PENALTY = 5.0  # $ per interruption event
+    # Tham số phạt
+    SLA_PENALTY_PER_FAILED_JOB = 10.0  # $ cho mỗi job thất bại
+    MIGRATION_COST = 1.0  # $ cho mỗi lần migration spot→OD (chi phí downtime)
+    MIGRATION_COST_TO_SPOT = 0.5  # $ cho mỗi lần migration OD→spot (rẻ hơn vì spot khởi tạo nhanh)
+    INTERRUPTION_PENALTY = 5.0  # $ cho mỗi sự kiện bị gián đoạn
 
     def __init__(
         self,
@@ -33,39 +34,42 @@ class CostCalculator:
         spot_price_avg: float = SPOT_PRICE_REFERENCE,
         sla_penalty: float = SLA_PENALTY_PER_FAILED_JOB,
         migration_cost: float = MIGRATION_COST,
+        migration_cost_to_spot: float = MIGRATION_COST_TO_SPOT,
     ):
         """
-        Initialize cost calculator.
+        Khởi tạo bộ tính chi phí.
 
         Args:
-            ondemand_price: On-demand price ($/hour)
-            spot_price_avg: Average spot price ($/hour, for reference)
-            sla_penalty: Penalty per failed job ($)
-            migration_cost: Cost per migration event ($)
+            ondemand_price: Giá on-demand ($/giờ)
+            spot_price_avg: Giá spot trung bình ($/giờ, để tham chiếu)
+            sla_penalty: Tiền phạt cho mỗi job thất bại ($)
+            migration_cost: Chi phí migration spot→OD ($)
+            migration_cost_to_spot: Chi phí migration OD→spot ($)
         """
         self.ondemand_price = ondemand_price
         self.spot_price_avg = spot_price_avg
         self.sla_penalty = sla_penalty
         self.migration_cost = migration_cost
+        self.migration_cost_to_spot = migration_cost_to_spot
 
     def compute_step_cost(
         self,
         num_spot: int,
         num_ondemand: int,
         spot_price: float,
-        timestep_duration: float = 1.0,  # hours
+        timestep_duration: float = 1.0,  # giờ
     ) -> float:
         """
-        Compute infrastructure cost for one timestep.
+        Tính chi phí hạ tầng cho một timestep.
 
         Args:
-            num_spot: Number of spot instances running
-            num_ondemand: Number of on-demand instances running
-            spot_price: Current spot price ($/hour)
-            timestep_duration: Duration of timestep in hours
+            num_spot: Số spot instance đang chạy
+            num_ondemand: Số on-demand instance đang chạy
+            spot_price: Giá spot hiện tại ($/giờ)
+            timestep_duration: Thời lượng timestep tính bằng giờ
 
         Returns:
-            Total cost for this timestep ($)
+            Tổng chi phí cho timestep này ($)
         """
         spot_cost = num_spot * spot_price * timestep_duration
         ondemand_cost = num_ondemand * self.ondemand_price * timestep_duration
@@ -79,15 +83,15 @@ class CostCalculator:
         timestep_duration: float = 1.0,
     ) -> float:
         """
-        Compute cost savings compared to all on-demand baseline.
+        Tính mức tiết kiệm so với baseline toàn bộ on-demand.
 
         Args:
-            actual_cost: Actual cost incurred ($)
-            total_capacity: Total number of instances (spot + on-demand)
-            timestep_duration: Duration in hours
+            actual_cost: Chi phí thực tế phát sinh ($)
+            total_capacity: Tổng số instance (spot + on-demand)
+            timestep_duration: Thời lượng tính bằng giờ
 
         Returns:
-            Savings compared to on-demand ($, positive means saved)
+            Mức tiết kiệm so với on-demand ($, dương = tiết kiệm được)
         """
         ondemand_baseline_cost = (
             total_capacity * self.ondemand_price * timestep_duration
@@ -102,15 +106,15 @@ class CostCalculator:
         sla_threshold: float = 0.95,
     ) -> float:
         """
-        Compute SLA penalty if compliance is below threshold.
+        Tính tiền phạt SLA nếu mức tuân thủ dưới ngưỡng.
 
         Args:
-            failed_jobs: Number of failed jobs
-            total_jobs: Total number of jobs (completed + failed)
-            sla_threshold: Minimum SLA compliance (0-1)
+            failed_jobs: Số job thất bại
+            total_jobs: Tổng số job (hoàn thành + thất bại)
+            sla_threshold: Mức tuân thủ SLA tối thiểu (0-1)
 
         Returns:
-            Penalty ($, always non-negative)
+            Tiền phạt ($, luôn không âm)
         """
         if total_jobs == 0:
             return 0.0
@@ -118,7 +122,7 @@ class CostCalculator:
         compliance = 1.0 - (failed_jobs / total_jobs)
 
         if compliance < sla_threshold:
-            # Penalty proportional to violation magnitude
+            # Phạt tỷ lệ thuận với mức độ vi phạm
             violation = sla_threshold - compliance
             penalty = failed_jobs * self.sla_penalty * (1 + violation)
             return penalty
@@ -127,25 +131,25 @@ class CostCalculator:
 
     def compute_migration_penalty(self, num_migrations: int) -> float:
         """
-        Compute cost of migrating jobs (downtime, overhead).
+        Tính chi phí migration job (downtime, overhead).
 
         Args:
-            num_migrations: Number of migration events in this timestep
+            num_migrations: Số sự kiện migration trong timestep này
 
         Returns:
-            Migration cost ($)
+            Chi phí migration ($)
         """
         return num_migrations * self.migration_cost
 
     def compute_interruption_penalty(self, num_interruptions: int) -> float:
         """
-        Compute penalty for spot interruptions.
+        Tính tiền phạt cho các lần spot bị gián đoạn.
 
         Args:
-            num_interruptions: Number of interruption events
+            num_interruptions: Số sự kiện bị gián đoạn
 
         Returns:
-            Interruption penalty ($)
+            Tiền phạt gián đoạn ($)
         """
         return num_interruptions * self.INTERRUPTION_PENALTY
 
@@ -158,23 +162,24 @@ class CostCalculator:
         interruption_penalty: float,
     ) -> float:
         """
-        Compute total reward for the timestep.
+        Tính tổng reward cho timestep.
 
-        Reward = savings - cost - penalties
+        Reward = savings - penalties
 
         Args:
-            step_cost: Infrastructure cost ($)
-            savings: Cost savings vs baseline ($)
-            sla_penalty: SLA violation penalty ($)
-            migration_penalty: Migration cost ($)
-            interruption_penalty: Interruption penalty ($)
+            step_cost: Chi phí hạ tầng ($)
+            savings: Mức tiết kiệm so với baseline ($)
+            sla_penalty: Tiền phạt vi phạm SLA ($)
+            migration_penalty: Chi phí migration ($)
+            interruption_penalty: Tiền phạt gián đoạn ($)
 
         Returns:
-            Total reward (can be negative)
+            Tổng reward (có thể âm)
         """
+        # savings = baseline - actual_cost, nên nếu trừ thêm step_cost
+        # sẽ bị phạt chi phí hạ tầng 2 lần.
         reward = (
             savings
-            - step_cost
             - sla_penalty
             - migration_penalty
             - interruption_penalty
@@ -183,10 +188,11 @@ class CostCalculator:
         return reward
 
     def get_cost_breakdown(self) -> Dict[str, float]:
-        """Return cost parameters for logging."""
+        """Trả về các tham số chi phí để ghi log."""
         return {
             "ondemand_price": self.ondemand_price,
             "spot_price_avg": self.spot_price_avg,
             "sla_penalty": self.sla_penalty,
             "migration_cost": self.migration_cost,
+            "migration_cost_to_spot": self.migration_cost_to_spot,
         }

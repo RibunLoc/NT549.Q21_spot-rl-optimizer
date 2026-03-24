@@ -33,13 +33,16 @@ def load_config(config_path: str) -> dict:
     return config
 
 
-def train(config: dict, experiment_name: str):
+def train(config: dict, experiment_name: str,
+          resume_path: str = None, resume_episode: int = 0):
     """
     Train DQN agent.
 
     Args:
         config: Configuration dictionary
         experiment_name: Name for this experiment
+        resume_path: Path to checkpoint to resume from
+        resume_episode: Episode number to resume from
     """
     # Setup directories
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -93,6 +96,11 @@ def train(config: dict, experiment_name: str):
 
     logger.info("DQN agent created")
 
+    # Resume from checkpoint if specified
+    if resume_path is not None:
+        agent.load(resume_path)
+        logger.info(f"Resumed from checkpoint: {resume_path} (episode {resume_episode})")
+
     # Training parameters
     train_config = config['training']
     num_episodes = train_config.get('num_episodes', 5000)
@@ -109,7 +117,8 @@ def train(config: dict, experiment_name: str):
     best_reward = -np.inf
     episode_rewards = []
 
-    for episode in range(1, num_episodes + 1):
+    start_episode = resume_episode + 1
+    for episode in range(start_episode, num_episodes + 1):
         state, info = env.reset()
         episode_reward = 0.0
         episode_loss = []
@@ -195,6 +204,10 @@ def main():
                         help='Path to config YAML file')
     parser.add_argument('--experiment-name', type=str, default='dqn_experiment',
                         help='Experiment name')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint .pth file to resume training')
+    parser.add_argument('--resume-episode', type=int, default=0,
+                        help='Episode number to resume from (e.g. 750)')
 
     args = parser.parse_args()
 
@@ -202,7 +215,8 @@ def main():
     config = load_config(args.config)
 
     # Train
-    train(config, args.experiment_name)
+    train(config, args.experiment_name,
+          resume_path=args.resume, resume_episode=args.resume_episode)
 
 
 if __name__ == '__main__':

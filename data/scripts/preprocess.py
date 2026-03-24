@@ -43,7 +43,7 @@ def preprocess_spot_prices(
     logger.info("Preprocessing spot prices...")
 
     df = df.copy()
-    df['timestamp'] = pd.to_datetime(df['timestamp'], utc=True)
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', utc=True)
     df = df.sort_values('timestamp')
 
     # Filter by instance type

@@ -4,13 +4,13 @@ env:
   data_path: "data/processed/price_features_stable.pkl"
   max_steps: 1000
   sla_threshold: 0.95
-  spot_capacity: 10
-  ondemand_capacity: 5
+  spot_capacity: 20          # tăng từ 10 → 20 (cho agent nhiều room để scale)
+  ondemand_capacity: 10       # tăng từ 5 → 10
   workload:
-    base_arrival_rate: 2.0
-    peak_multiplier: 3.0
+    base_arrival_rate: 1.5    # giảm từ 2.0 → 1.5 (bớt áp lực)
+    peak_multiplier: 2.0      # giảm từ 3.0 → 2.0 (peak không quá gấp)
     peak_hours: [9, 10, 11, 14, 15, 16]
-    avg_job_duration: 10
+    avg_job_duration: 5       # giảm từ 10 → 5 (job ngắn hơn, realistic hơn)
   cost:
     ondemand_price: 0.096
     sla_penalty: 10.0
@@ -18,17 +18,17 @@ env:
 
 agent:
   type: "DQN"
-  learning_rate: 0.0001
+  learning_rate: 0.0003       # tăng từ 0.0001 → học nhanh hơn
   gamma: 0.99
   epsilon_start: 1.0
   epsilon_end: 0.01
-  epsilon_decay: 100000
-  batch_size: 64
+  epsilon_decay: 50000        # giảm từ 100000 → explore ít hơn, exploit sớm hơn
+  batch_size: 128             # tăng từ 64 → mỗi step học nhiều hơn
   replay_buffer_size: 100000
-  target_update_freq: 1000
+  target_update_freq: 500     # giảm từ 1000 → cập nhật target network nhanh hơn
 
 training:
-  num_episodes: 5000
-  max_steps_per_episode: 1000
+  num_episodes: 3000          # giảm từ 5000 → tiết kiệm thời gian
+  max_steps_per_episode: 500  # giảm từ 1000 → episode ngắn hơn, feedback nhanh hơn
   log_interval: 10
   save_interval: 100

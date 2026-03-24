@@ -43,25 +43,19 @@ class AlwaysOnDemandAgent(BaselineAgent):
     """
 
     ACTION_REQUEST_ONDEMAND = 1
-    ACTION_DO_NOTHING = 5
+    ACTION_DO_NOTHING = 6
 
     def __init__(self, target_capacity: int = 5):
-        """
-        Initialize agent.
-
-        Args:
-            target_capacity: Target number of instances to maintain
-        """
         self.target_capacity = target_capacity
 
     def select_action(self, observation: np.ndarray, info: Dict[str, Any] = None) -> int:
-        """Select action: request on-demand if below capacity."""
-        # TODO: Parse observation to get current capacity
-        # For now, simple logic: request on-demand if capacity low
-
-        if info and 'ondemand_instances' in info:
-            current_ondemand = info['ondemand_instances']
-            if current_ondemand < self.target_capacity:
+        """Request on-demand until capacity đủ cho pending + running jobs."""
+        if info:
+            current_ondemand = info.get('ondemand_instances', 0)
+            pending = info.get('pending_jobs', 0)
+            # Scale theo demand, không chỉ theo target cố định
+            needed = max(self.target_capacity, pending)
+            if current_ondemand < needed:
                 return self.ACTION_REQUEST_ONDEMAND
 
         return self.ACTION_DO_NOTHING
@@ -77,22 +71,18 @@ class AlwaysSpotAgent(BaselineAgent):
     """
 
     ACTION_REQUEST_SPOT = 0
-    ACTION_DO_NOTHING = 5
+    ACTION_DO_NOTHING = 6
 
     def __init__(self, target_capacity: int = 5):
-        """
-        Initialize agent.
-
-        Args:
-            target_capacity: Target number of spot instances
-        """
         self.target_capacity = target_capacity
 
     def select_action(self, observation: np.ndarray, info: Dict[str, Any] = None) -> int:
-        """Select action: request spot if below capacity."""
-        if info and 'spot_instances' in info:
-            current_spot = info['spot_instances']
-            if current_spot < self.target_capacity:
+        """Request spot until capacity đủ cho pending + running jobs."""
+        if info:
+            current_spot = info.get('spot_instances', 0)
+            pending = info.get('pending_jobs', 0)
+            needed = max(self.target_capacity, pending)
+            if current_spot < needed:
                 return self.ACTION_REQUEST_SPOT
 
         return self.ACTION_DO_NOTHING
@@ -110,7 +100,7 @@ class ThresholdBasedAgent(BaselineAgent):
 
     ACTION_REQUEST_SPOT = 0
     ACTION_REQUEST_ONDEMAND = 1
-    ACTION_DO_NOTHING = 5
+    ACTION_DO_NOTHING = 6
 
     def __init__(
         self,
@@ -132,19 +122,19 @@ class ThresholdBasedAgent(BaselineAgent):
         self.price_threshold = threshold_ratio * ondemand_price
 
     def select_action(self, observation: np.ndarray, info: Dict[str, Any] = None) -> int:
-        """Select action based on current spot price."""
-        # TODO: Parse observation to extract spot price
-        # Observation format: [spot_price, ..., num_spot, num_ondemand, ...]
+        """Select action based on current spot price (from info, not normalized obs)."""
+        if not info:
+            return self.ACTION_DO_NOTHING
 
-        # Assume observation[0] is current spot price
-        current_spot_price = observation[0]
+        current_spot_price = info.get('spot_price', self.ondemand_price)
+        total_instances = info.get('spot_instances', 0) + info.get('ondemand_instances', 0)
+        pending = info.get('pending_jobs', 0)
+        needed = max(self.target_capacity, pending)
 
-        if info:
-            total_instances = info.get('spot_instances', 0) + info.get('ondemand_instances', 0)
-            if total_instances >= self.target_capacity:
-                return self.ACTION_DO_NOTHING
+        if total_instances >= needed:
+            return self.ACTION_DO_NOTHING
 
-        # Decide based on price
+        # Chọn spot nếu giá dưới ngưỡng, ngược lại dùng on-demand
         if current_spot_price < self.price_threshold:
             return self.ACTION_REQUEST_SPOT
         else:
@@ -158,7 +148,7 @@ class RandomAgent(BaselineAgent):
     Used as sanity check - any reasonable policy should beat this.
     """
 
-    def __init__(self, num_actions: int = 6, seed: int = None):
+    def __init__(self, num_actions: int = 7, seed: int = None):
         """
         Initialize agent.
 

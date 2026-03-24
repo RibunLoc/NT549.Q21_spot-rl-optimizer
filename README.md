@@ -1,52 +1,137 @@
-# Tối ưu chiến lược sử dụng Spot Instance bằng Học tăng cường (Deep RL)
+# Tối ưu chi phí AWS Spot Instance bằng Deep Reinforcement Learning
 
-## Tổng quan
+## Dự án này làm gì?
 
-Dự án nghiên cứu áp dụng Deep Reinforcement Learning (DQN) để tối ưu hóa chiến lược sử dụng AWS EC2 Spot Instance, giảm chi phí cloud 20-40% trong khi vẫn đảm bảo availability cho batch processing workloads.
+Khi chạy workload trên AWS, bạn có 2 lựa chọn:
 
-**Mục tiêu chính:**
-- Giảm chi phí cloud so với on-demand instances
-- Thích nghi với biến động giá spot theo thời gian thực
-- Đảm bảo SLA: >95% tỷ lệ hoàn thành jobs
-- Giảm thiểu ảnh hưởng từ spot interruption
+| | EC2 On-Demand | EC2 Spot Instance |
+|---|---|---|
+| **Giá** | Cố định ($0.096/hr cho m5.large) | Rẻ hơn 60-90%, nhưng biến động theo thị trường |
+| **Rủi ro** | Không có | AWS có thể **thu hồi bất kỳ lúc nào** (interruption) |
+| **Phù hợp** | Workload quan trọng, cần ổn định | Batch jobs, có thể retry |
 
-**Kết quả dự kiến:**
-- 20-40% tiết kiệm chi phí vs always on-demand
-- Agent học được pattern giá theo giờ/ngày
-- Tự động migrate khi xác suất interruption cao
-- SLA compliance >95%
+**Vấn đề:** Dùng toàn On-Demand thì đắt. Dùng toàn Spot thì hay bị gián đoạn. Làm sao chọn đúng lúc dùng Spot, đúng lúc dùng On-Demand?
+
+**Giải pháp:** Train một **DQN agent** (Deep Q-Network) để tự động quyết định:
+- Khi nào thêm/bớt Spot instance
+- Khi nào thêm/bớt On-Demand instance
+- Khi nào migrate workload từ Spot sang On-Demand (tránh bị interrupt)
+- Khi nào giữ nguyên
+
+Agent học từ dữ liệu giá Spot thực tế của AWS và tối ưu đồng thời **giảm chi phí** và **đảm bảo SLA** (>95% jobs hoàn thành đúng hạn).
+
+---
+
+## Kết quả đã đạt được
+
+### Các lần training đã chạy
+
+| Run | Scenario | Episodes | Mô tả |
+|-----|----------|----------|--------|
+| `dqn_first_run` | Stable price | 3000 | Lần chạy đầu tiên, giá ổn định |
+| `dqn_v2` | Stable price | 3000 | Tuning hyperparameters |
+| `dqn_v3_stable` | Stable price | 3000 | Version ổn định nhất |
+| `dqn_v4_volatile` | Volatile price | — | Test với giá biến động mạnh |
+
+### Models đã train
+
+```
+results/models/
+├── dqn_v3_stable_best.pth     # Best model trên stable price
+├── dqn_v4_volatile_best.pth   # Best model trên volatile price
+├── dqn_v2_best.pth            # Version 2
+├── dqn_first_run_best.pth     # Lần chạy đầu
+└── training_results.json      # Kết quả tổng hợp
+```
+
+### Plots đã generate
+
+```
+results/plots/
+├── action_distribution_dqn_default.png   # Agent chọn action nào nhiều nhất
+├── cost_sla_comparison_stable.png        # So sánh DQN vs baselines
+└── cost_sla_dqn_default.png              # Cost vs SLA trade-off
+```
+
+---
+
+## Bài toán RL (MDP Formulation)
+
+### State — Agent nhìn thấy gì? (15 features)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  MARKET (5)          │  INFRA (3)       │  WORKLOAD (4)  │  TIME (3)          │
+│  ─────────           │  ─────────       │  ─────────     │  ─────────         │
+│  Giá spot hiện tại   │  Số spot inst    │  Jobs đang chờ │  Giờ trong ngày    │
+│  MA giá 6h           │  Số OD inst      │  Jobs đang chạy│  Ngày trong tuần   │
+│  MA giá 24h          │  Tổng capacity   │  Dự báo load   │  % episode đã qua  │
+│  Độ biến động giá    │                  │  Thời gian chờ │                    │
+│  Xác suất interrupt  │                  │                │                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+Tất cả được normalize về [0, 1].
+
+### Action — Agent có thể làm gì? (7 actions)
+
+| # | Action | Ý nghĩa | Mỗi lần thay đổi |
+|---|--------|---------|-------------------|
+| 0 | `REQUEST_SPOT` | Thêm spot instances | +3 instances |
+| 1 | `REQUEST_ONDEMAND` | Thêm on-demand instances | +3 instances |
+| 2 | `TERMINATE_SPOT` | Giảm spot instances | -3 instances |
+| 3 | `TERMINATE_ONDEMAND` | Giảm on-demand instances | -3 instances |
+| 4 | `MIGRATE_TO_ONDEMAND` | Chuyển spot → on-demand (tránh interrupt) | 3 instances, $1/inst |
+| 5 | `MIGRATE_TO_SPOT` | Chuyển on-demand → spot (tiết kiệm chi phí) | 3 instances, $0.5/inst |
+| 6 | `DO_NOTHING` | Giữ nguyên | — |
+
+### Reward — Agent được thưởng/phạt thế nào?
+
+```
+reward = savings - sla_penalty - migration_penalty - interruption_penalty - pending_penalty
+
+│  savings            =  (chi phí nếu dùng toàn OD) - (chi phí thực tế)    → khuyến khích dùng Spot
+│  sla_penalty        =  số job fail × $10 × (1 + tỷ lệ vi phạm)          → phạt nặng nếu SLA < 95%
+│  migration_penalty  =  migrate→OD: $1/inst, migrate→Spot: $0.5/inst       → migrate tốn tiền
+│  interruption_penalty = số lần bị interrupt × $5                          → bị AWS thu hồi
+│  pending_penalty    =  số job đang chờ × $0.1                             → queue dài = chậm
+```
+
+**Mục tiêu:** Agent cần cân bằng giữa tiết kiệm (dùng Spot) và an toàn (dùng On-Demand).
 
 ---
 
 ## Kiến trúc hệ thống
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     DQN Agent (PyTorch)                     │
-│  ┌─────────────┐  ┌──────────────┐  ┌──────────────────┐  │
-│  │ Q-Network   │  │ Target       │  │ Replay Buffer    │  │
-│  │ (MLP/LSTM)  │  │ Network      │  │ (Experience)     │  │
-│  └─────────────┘  └──────────────┘  └──────────────────┘  │
-└────────────┬────────────────────────────────────────────────┘
-             │ Action: [Spot/OnDemand/Terminate/Migrate]
-             ↓
-┌─────────────────────────────────────────────────────────────┐
-│         SpotInstanceEnv (Gymnasium Environment)             │
-│  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ State:       │  │ Reward:      │  │ Dynamics:       │  │
-│  │ - spot price │  │ - cost saved │  │ - price model   │  │
-│  │ - workload   │  │ - SLA penalty│  │ - interruption  │  │
-│  │ - instances  │  │ - migration  │  │ - job scheduler │  │
-│  └──────────────┘  └──────────────┘  └─────────────────┘  │
-└────────────┬────────────────────────────────────────────────┘
-             │
-             ↓
-┌─────────────────────────────────────────────────────────────┐
-│            Data Sources (AWS Spot History)                  │
-│  • Historical spot pricing (boto3 API)                      │
-│  • Interruption frequency per AZ/instance-type              │
-│  • Synthetic workload patterns (batch jobs)                 │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                   DQN Agent (PyTorch)                     │
+│                                                          │
+│   Q-Network ──────► Action ◄────── ε-greedy exploration  │
+│   (MLP: 15→256→128→6)                                    │
+│                                                          │
+│   Target Network    Replay Buffer (100K transitions)     │
+│   (sync mỗi 500 steps)                                   │
+└─────────────┬────────────────────────────────────────────┘
+              │ action
+              ▼
+┌──────────────────────────────────────────────────────────┐
+│              SpotInstanceEnv (Gymnasium)                   │
+│                                                          │
+│   Market Simulator ─── replay giá spot thực từ AWS       │
+│   Workload Generator ─ Poisson arrival, peak hours       │
+│   Job Scheduler ────── FIFO queue, deadline-based SLA    │
+│   Cost Calculator ──── spot/OD pricing, penalties        │
+└─────────────┬────────────────────────────────────────────┘
+              │
+              ▼
+┌──────────────────────────────────────────────────────────┐
+│                 Dữ liệu AWS Spot Price                    │
+│                                                          │
+│   ap-southeast-1, us-east-1, us-west-2                   │
+│   m5.large — 90 ngày lịch sử (12/2025 → 03/2026)        │
+│   + synthetic scenarios (stable, volatile, spike)        │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -55,508 +140,223 @@ Dự án nghiên cứu áp dụng Deep Reinforcement Learning (DQN) để tối 
 
 ```
 spot-rl-optimiztion/
-├── README.md                  # File này
-├── requirements.txt           # Dependencies
-├── .gitignore
 │
-├── data/                      # Dữ liệu và datasets
-│   ├── raw/                   # Dữ liệu thô từ AWS API
-│   │   ├── spot_prices/       # Historical spot prices (CSV/parquet)
-│   │   └── interruptions/     # Interruption frequency data
-│   ├── processed/             # Dữ liệu đã xử lý
-│   │   ├── price_features_*.pkl # Engineered features (rolling avg, volatility)
-│   │   └── workload_traces.pkl# Workload patterns
-│   └── scripts/               # Scripts thu thập dữ liệu
-│       ├── fetch_spot_prices.py   # Crawl AWS spot price history
-│       ├── generate_workload.py   # Generate synthetic workload
-│       └── preprocess.py          # Data cleaning & feature engineering
+├── agents/                         # RL Agents
+│   ├── dqn_agent.py                # DQN agent chính (ε-greedy, experience replay)
+│   ├── networks.py                 # Neural networks (MLP, LSTM, Dueling)
+│   ├── replay_buffer.py            # Experience replay buffer
+│   └── baselines.py                # 4 baselines để so sánh
 │
-├── envs/                      # Gymnasium environments
-│   ├── __init__.py
-│   ├── spot_env.py            # Main SpotInstanceEnv (MDP formulation)
-│   ├── market_simulator.py   # Spot price simulator (time-series model)
-│   ├── workload_generator.py # Batch job arrival & execution model
-│   └── cost_calculator.py    # Chi phí spot/on-demand, SLA penalty
+├── envs/                           # Gymnasium Environment
+│   ├── spot_env.py                 # SpotInstanceEnv — environment chính
+│   ├── market_simulator.py         # Replay giá spot + tính interruption probability
+│   ├── workload_generator.py       # Sinh workload theo Poisson process
+│   └── cost_calculator.py          # Tính chi phí spot/OD và penalties
 │
-├── agents/                    # RL agents
-│   ├── __init__.py
-│   ├── dqn_agent.py           # DQN implementation (PyTorch)
-│   ├── networks.py            # Neural network architectures (MLP, LSTM)
-│   ├── replay_buffer.py       # Experience replay buffer
-│   └── baselines.py           # Baseline strategies (always on-demand, threshold)
+├── experiments/                    # Training & Evaluation
+│   ├── train.py                    # Script training chính
+│   ├── evaluate.py                 # Đánh giá model
+│   ├── compare_baselines.py        # So sánh DQN vs baselines
+│   └── configs/                    # YAML configs cho từng scenario
+│       ├── dqn_default.yaml        # Config chính (3000 ep, stable price)
+│       ├── dqn_quick_test.yaml     # Test nhanh (100 ep)
+│       ├── stable_price.yaml       # Scenario giá ổn định
+│       ├── volatile_price.yaml     # Scenario giá biến động
+│       └── workload_spike.yaml     # Scenario workload đột biến
 │
-├── utils/                     # Utilities
-│   ├── __init__.py
-│   ├── config.py              # Config parser (YAML)
-│   ├── logger.py              # Logging & TensorBoard
-│   ├── metrics.py             # Evaluation metrics (cost, availability, SLA)
-│   └── visualization.py       # Plotting (price curves, action heatmaps)
+├── data/
+│   ├── raw/spot_prices/            # CSV giá spot thực từ AWS (3 regions)
+│   ├── processed/                  # Features đã xử lý (.pkl)
+│   │   ├── price_features_stable.pkl
+│   │   ├── price_features_volatile.pkl
+│   │   └── price_features_spike.pkl
+│   └── scripts/                    # Scripts thu thập & xử lý data
+│       ├── fetch_spot_prices.py    # Crawl giá từ AWS API (boto3)
+│       └── preprocess.py           # Feature engineering
 │
-├── experiments/               # Experiment scripts
-│   ├── configs/               # YAML configs cho các thí nghiệm
-│   │   ├── dqn_default.yaml
-│   │   ├── stable_price.yaml  # Scenario: giá ổn định
-│   │   ├── volatile_price.yaml# Scenario: giá biến động mạnh
-│   │   └── workload_spike.yaml# Scenario: workload đột biến
-│   ├── train.py               # Training script
-│   ├── evaluate.py            # Evaluation script
-│   ├── compare_baselines.py  # So sánh với baselines
-│   └── generate_report.py    # Sinh báo cáo tĩnh
+├── utils/                          # Tiện ích
+│   ├── config.py                   # Đọc YAML config
+│   ├── logger.py                   # Logging + TensorBoard
+│   ├── metrics.py                  # MetricsTracker (save/load metrics.pkl)
+│   └── visualization.py           # Plotting functions
 │
-├── results/                   # Kết quả thực nghiệm
-│   ├── models/                # Trained models (.pth)
-│   ├── logs/                  # Training logs (TensorBoard)
-│   ├── plots/                 # Biểu đồ (PNG/PDF)
-│   └── reports/               # Báo cáo chi tiết (Markdown/LaTeX)
+├── results/                        # Kết quả training
+│   ├── dqn_first_run/             # Run 1: metrics.pkl + checkpoints + logs
+│   ├── dqn_v2/                    # Run 2
+│   ├── dqn_v3_stable/             # Run 3 (stable scenario)
+│   ├── dqn_v4_volatile/           # Run 4 (volatile scenario)
+│   ├── models/                    # Best & final models (.pth)
+│   ├── plots/                     # Biểu đồ PNG
+│   └── reports/                   # Báo cáo
 │
-└── notebooks/                 # Jupyter notebooks (EDA, demo)
-    ├── 01_data_exploration.ipynb    # Phân tích dữ liệu spot price
-    ├── 02_env_testing.ipynb         # Test Gym environment
-    ├── 03_training_analysis.ipynb   # Phân tích quá trình training
-    └── 04_results_visualization.ipynb # Visualize kết quả
+├── notebooks/
+│   └── visualize_training.ipynb   # Notebook phân tích kết quả training
+│
+├── app.py                         # Web interface
+├── dashboard.py                   # Dashboard visualization
+├── Makefile                       # Build commands
+├── Dockerfile                     # Container
+├── docker-compose.yml
+└── requirements.txt               # Dependencies
 ```
-
----
-
-## Phương pháp luận
-
-### 1. Mô hình hóa bài toán (MDP)
-
-#### State Space (Observation)
-```python
-state = {
-    # Market information
-    'current_spot_price': float,           # Giá spot hiện tại ($/hour)
-    'spot_price_ma_1h': float,             # Moving avg 1 hour
-    'spot_price_ma_24h': float,            # Moving avg 24 hours
-    'price_volatility': float,             # Độ biến động giá (std dev)
-    'interruption_prob': float,            # Xác suất bị interrupt (0-1)
-
-    # Infrastructure state
-    'num_spot_instances': int,             # Số spot instances đang chạy
-    'num_ondemand_instances': int,         # Số on-demand instances
-    'total_capacity': int,                 # Tổng capacity (vCPUs)
-
-    # Workload state
-    'pending_jobs': int,                   # Jobs đang chờ
-    'running_jobs': int,                   # Jobs đang chạy
-    'workload_forecast_1h': float,         # Dự đoán workload 1h tới
-    'queue_wait_time': float,              # Thời gian chờ trung bình (minutes)
-
-    # Time features
-    'hour_of_day': int,                    # 0-23 (giá thường cao giờ cao điểm)
-    'day_of_week': int,                    # 0-6 (pattern khác cuối tuần)
-}
-```
-
-#### Action Space (Discrete)
-```python
-actions = {
-    0: 'REQUEST_SPOT',        # Request thêm spot instance
-    1: 'REQUEST_ONDEMAND',    # Request on-demand instance
-    2: 'TERMINATE_SPOT',      # Terminate spot instance
-    3: 'TERMINATE_ONDEMAND',  # Terminate on-demand
-    4: 'MIGRATE_TO_ONDEMAND', # Migrate job từ spot sang on-demand
-    5: 'DO_NOTHING',          # Giữ nguyên
-}
-```
-
-#### Reward Function
-```python
-reward = (
-    - cost_incurred              # Âm: chi phí spot/on-demand trong timestep
-    + cost_saved_vs_ondemand     # Dương: tiền tiết kiệm được
-    - sla_penalty                # Âm: phạt khi vi phạm SLA (job timeout)
-    - migration_cost             # Âm: chi phí migrate (downtime)
-    - interruption_penalty       # Âm: phạt khi spot bị interrupt
-)
-
-# Ví dụ:
-# - On-demand m5.large: $0.096/hour
-# - Spot m5.large: $0.030/hour (average)
-# - SLA penalty: -$10 per failed job
-# - Migration cost: -$1 per migration
-```
-
-### 2. Deep Q-Network (DQN)
-
-**Thuật toán:** DQN với Experience Replay và Target Network
-
-**Kiến trúc neural network:**
-```python
-class QNetwork(nn.Module):
-    # Input: state vector (dimension ~15)
-    # Hidden: 2-3 fully connected layers (256, 128 units)
-    # Output: Q-values cho 6 actions
-    # Activation: ReLU
-    # Optional: LSTM layer để capture temporal dependencies
-```
-
-**Hyperparameters:**
-- Learning rate: 1e-4
-- Discount factor (γ): 0.99
-- Epsilon (exploration): 1.0 → 0.01 (decay over 100k steps)
-- Replay buffer size: 100k transitions
-- Batch size: 64
-- Target network update frequency: 1000 steps
-
-### 3. Baselines để so sánh
-
-1. **Always On-Demand**: Chỉ dùng on-demand (chi phí cao nhất, no risk)
-2. **Always Spot**: Chỉ dùng spot (rẻ nhưng rủi ro cao)
-3. **Threshold-based**: Request spot khi giá < threshold (e.g., 30% on-demand price)
-4. **Random**: Random action (sanity check)
 
 ---
 
 ## Hướng dẫn sử dụng
 
-### 1. Setup môi trường
+### 1. Setup
 
 ```bash
-# Clone repo (nếu có git)
-git clone <repo-url>
-cd spot-rl-optimiztion
-
-# Tạo virtual environment
 python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# hoặc: venv\Scripts\activate  # Windows
-
-# Cài dependencies
+venv\Scripts\activate              # Windows
 pip install -r requirements.txt
 ```
 
-### 2. Thu thập dữ liệu AWS Spot Price
-
-**Yêu cầu:** AWS account + boto3 credentials configured (`~/.aws/credentials`)
+### 2. Thu thập dữ liệu
 
 ```bash
-# Fetch spot price history (30 ngày gần nhất)
+# Lấy giá spot thực từ AWS (cần AWS credentials)
 python data/scripts/fetch_spot_prices.py \
     --region ap-southeast-1 \
     --instance-types m5.large \
     --days 30 \
     --output data/raw/spot_prices/
 
-# Generate synthetic price scenarios (stable/volatile/spike)
-python data/scripts/generate_synthetic_spot_prices.py \
-    --region ap-southeast-1 \
-    --instance-types m5.large \
-    --days 30 \
-    --volatility 0.10 \
-    --spike-prob 0.005 \
-    --spike-multiplier 1.5 \
-    --tag stable \
-    --output data/raw/spot_prices/
-
-python data/scripts/generate_synthetic_spot_prices.py \
-    --region ap-southeast-1 \
-    --instance-types m5.large \
-    --days 30 \
-    --volatility 0.25 \
-    --spike-prob 0.05 \
-    --spike-multiplier 4.0 \
-    --tag volatile \
-    --output data/raw/spot_prices/
-
-python data/scripts/generate_synthetic_spot_prices.py \
-    --region ap-southeast-1 \
-    --instance-types m5.large \
-    --days 30 \
-    --volatility 0.18 \
-    --spike-prob 0.08 \
-    --spike-multiplier 5.0 \
-    --tag spike \
-    --output data/raw/spot_prices/
-
-# Preprocess data
+# Xử lý data → features
 python data/scripts/preprocess.py \
     --input data/raw/ \
     --input-glob "spot_prices/*stable*.csv" \
     --output data/processed/ \
     --output-name price_features_stable \
     --instance-type m5.large
-
-python data/scripts/preprocess.py \
-    --input data/raw/ \
-    --input-glob "spot_prices/*volatile*.csv" \
-    --output data/processed/ \
-    --output-name price_features_volatile \
-    --instance-type m5.large
-
-python data/scripts/preprocess.py \
-    --input data/raw/ \
-    --input-glob "spot_prices/*spike*.csv" \
-    --output data/processed/ \
-    --output-name price_features_spike \
-    --instance-type m5.large
 ```
 
-### 3. Test Gym environment
+### 3. Training
 
 ```bash
-# Chạy random policy để test env
-python -c "
-import gymnasium as gym
-from envs.spot_env import SpotInstanceEnv
-
-env = SpotInstanceEnv(
-    data_path='data/processed/price_features_stable.pkl',
-    max_steps=1000
-)
-
-obs, info = env.reset()
-for _ in range(100):
-    action = env.action_space.sample()  # Random action
-    obs, reward, terminated, truncated, info = env.step(action)
-    print(f'Action: {action}, Reward: {reward:.2f}, Cost: {info[\"cost\"]:.2f}')
-    if terminated or truncated:
-        break
-"
-```
-
-### 4. Training DQN agent
-
-```bash
-# Train với config mặc định
-python experiments/train.py --config experiments/configs/dqn_default.yaml
-
-# Train với custom config
+# Train DQN agent (3000 episodes, ~vài giờ)
 python experiments/train.py \
-    --config experiments/configs/volatile_price.yaml \
-    --experiment-name "dqn_volatile_price"
+    --config experiments/configs/dqn_default.yaml \
+    --experiment-name dqn_my_run
 
-# Best model được export ra:
-# results/models/dqn_volatile_price_best.pth
+# Test nhanh (100 episodes)
+python experiments/train.py \
+    --config experiments/configs/dqn_quick_test.yaml \
+    --experiment-name quick_test
+
+# Monitor bằng TensorBoard
+tensorboard --logdir results/dqn_my_run/
 ```
 
-**Config file example** (`dqn_default.yaml`):
-```yaml
-env:
-  data_path: "data/processed/price_features_stable.pkl"
-  max_steps: 1000
-  sla_threshold: 0.95
-  workload:
-    base_arrival_rate: 2.0
-    peak_multiplier: 3.0
-    peak_hours: [9, 10, 11, 14, 15, 16]
-    avg_job_duration: 10
-  cost:
-    ondemand_price: 0.096
-    sla_penalty: 10.0
-    migration_cost: 1.0
-
-agent:
-  type: "DQN"
-  learning_rate: 0.0001
-  gamma: 0.99
-  epsilon_start: 1.0
-  epsilon_end: 0.01
-  epsilon_decay: 100000
-  batch_size: 64
-  replay_buffer_size: 100000
-  target_update_freq: 1000
-
-training:
-  num_episodes: 5000
-  max_steps_per_episode: 1000
-  log_interval: 10
-  save_interval: 100
-```
-
-### 5. Evaluation và so sánh
+### 4. Đánh giá & So sánh
 
 ```bash
-# Evaluate trained model
+# Evaluate model
 python experiments/evaluate.py \
-    --config experiments/configs/volatile_price.yaml \
-    --model results/models/dqn_volatile_price_best.pth \
-    --episodes 100 \
-    --seeds 5 \
-    --output-dir results
+    --model results/models/dqn_my_run_best.pth \
+    --config experiments/configs/stable_price.yaml \
+    --episodes 100
 
 # So sánh với baselines
 python experiments/compare_baselines.py \
-    --dqn-model results/models/dqn_default_best.pth \
+    --dqn-model results/models/dqn_my_run_best.pth \
     --scenarios stable,volatile,spike \
     --output-dir results
-
-# Sinh báo cáo tĩnh
-python experiments/generate_report.py --results-dir results
 ```
 
-### 6. Visualization
+### 5. Xem kết quả
 
-```bash
-# Plot training curves
-python utils/visualization.py \
-    --tensorboard-log results/logs/dqn_default \
-    --output results/plots/training_curves.png
-
-# Hoặc dùng Jupyter notebook
-jupyter notebook notebooks/04_results_visualization.ipynb
-```
+Mở notebook `notebooks/visualize_training.ipynb` để xem:
+- Learning curves (reward, cost, SLA)
+- So sánh các lần chạy
+- Action distribution
+- Cost vs SLA trade-off
 
 ---
 
 ## Kịch bản thử nghiệm
 
-### Scenario 1: Giá ổn định (Stable Price)
-- **Mô tả:** Giá spot biến động thấp (±10% xung quanh mean)
-- **Mục tiêu:** Agent nên maximize spot usage
-- **Config:** `experiments/configs/stable_price.yaml`
+### Scenario 1: Giá ổn định (Stable)
+- Giá spot biến động thấp (~±10%)
+- Agent nên tối đa dùng Spot → tiết kiệm nhiều
+- Config: `experiments/configs/stable_price.yaml`
 
-### Scenario 2: Giá biến động mạnh (Volatile Price)
-- **Mô tả:** Giá spike 2-3x đột ngột, xác suất interrupt cao
-- **Mục tiêu:** Agent học được khi nào switch sang on-demand
-- **Config:** `experiments/configs/volatile_price.yaml`
+### Scenario 2: Giá biến động mạnh (Volatile)
+- Giá spike 2-4x đột ngột, interruption probability cao
+- Agent cần học khi nào rút về On-Demand
+- Config: `experiments/configs/volatile_price.yaml`
 
-### Scenario 3: Workload spike
-- **Mô tả:** Workload đột ngột tăng 5x (giờ cao điểm)
-- **Mục tiêu:** Đảm bảo SLA khi demand cao
-- **Config:** `experiments/configs/workload_spike.yaml`
-
----
-
-## Metrics đánh giá
-
-### Cost Metrics
-- **Total Cost**: Tổng chi phí trong episode
-- **Cost per Job**: Chi phí trung bình/job
-- **Savings vs On-Demand**: % tiết kiệm so với baseline
-- **Spot Utilization Rate**: % thời gian dùng spot vs on-demand
-
-### Performance Metrics
-- **SLA Compliance**: % jobs hoàn thành đúng hạn
-- **Job Completion Rate**: % jobs hoàn thành (không timeout)
-- **Average Queue Wait Time**: Thời gian chờ trung bình
-- **Interruption Impact**: % jobs bị ảnh hưởng bởi spot interrupt
-
-### Agent Metrics
-- **Cumulative Reward**: Tổng reward trong episode
-- **Q-value Convergence**: Stability của Q-values
-- **Action Distribution**: Tần suất các actions được chọn
+### Scenario 3: Workload đột biến (Spike)
+- Workload tăng 3-5x vào giờ cao điểm
+- Agent cần đảm bảo đủ capacity, không để job fail
+- Config: `experiments/configs/workload_spike.yaml`
 
 ---
 
-## Deliverables
+## So sánh với Baselines
 
-### Code deliverables
-- [x] Gymnasium environment (`envs/spot_env.py`)
-- [x] DQN agent implementation (`agents/dqn_agent.py`)
-- [x] Data collection scripts (`data/scripts/`)
-- [ ] Trained model checkpoints (`results/models/`)
-- [x] Baseline implementations (`agents/baselines.py`)
-
-### Documentation
-- [x] README.md (file này)
-- [ ] API documentation (docstrings + Sphinx)
-- [ ] Architecture diagram
-- [ ] Experiment report (LaTeX/Markdown)
-
-### Results
-- [ ] Training curves (loss, reward, epsilon)
-- [ ] Comparison tables (DQN vs baselines)
-- [ ] Cost-performance plots
-- [ ] Action heatmaps (action distribution over price levels)
-- [ ] Case study: specific episodes with annotations
+| Strategy | Mô tả | Chi phí | SLA | Rủi ro |
+|----------|--------|---------|-----|--------|
+| **Always On-Demand** | Chỉ dùng OD | Cao nhất | ~100% | Không |
+| **Always Spot** | Chỉ dùng Spot | Thấp nhất | 70-80% | Cao |
+| **Threshold** | Dùng Spot khi giá < ngưỡng | Trung bình | 85-90% | Trung bình |
+| **Random** | Chọn ngẫu nhiên | Ngẫu nhiên | ~50% | Cao |
+| **DQN Agent** | Học từ data | **Thấp** | **>95%** | **Thấp** |
 
 ---
 
-## Roadmap & Timeline
+## Hyperparameters chính
 
-### Phase 1: Data & Environment (Tuần 1-2)
-- [ ] Crawl AWS spot price history (30-60 ngày)
-- [ ] Generate synthetic workload patterns
-- [ ] Implement Gymnasium environment
-- [ ] Test environment với random policy
-
-### Phase 2: Agent Implementation (Tuần 3-4)
-- [ ] Implement DQN agent (PyTorch)
-- [ ] Implement baselines (always on-demand, threshold, random)
-- [ ] Setup training pipeline & logging
-
-### Phase 3: Experiments (Tuần 5-6)
-- [ ] Train DQN trên 3 scenarios (stable, volatile, spike)
-- [ ] Hyperparameter tuning
-- [ ] Evaluate và so sánh với baselines
-
-### Phase 4: Analysis & Report (Tuần 7-8)
-- [ ] Phân tích kết quả (cost savings, SLA compliance)
-- [ ] Tạo visualizations (plots, heatmaps)
-- [ ] Viết báo cáo cuối kỳ
-- [ ] Chuẩn bị slide thuyết trình
+| Parameter | Giá trị | Ý nghĩa |
+|-----------|---------|---------|
+| Learning rate | 0.0003 | Tốc độ học của Q-network |
+| Gamma (γ) | 0.99 | Discount factor — agent nhìn xa |
+| Epsilon | 1.0 → 0.01 | Exploration: ban đầu random, dần dần exploit |
+| Epsilon decay | 50,000 steps | Tốc độ giảm exploration |
+| Batch size | 128 | Số transitions mỗi lần update |
+| Replay buffer | 100,000 | Lưu bao nhiêu experience |
+| Target update | 500 steps | Sync target network mỗi 500 steps |
+| Episodes | 3,000 | Số episode training |
+| Max steps/ep | 500 | Số bước tối đa mỗi episode |
 
 ---
 
 ## Tech Stack
 
-- **Python:** 3.9+
-- **RL Framework:** Gymnasium 0.29+
-- **Deep Learning:** PyTorch 2.0+
-- **Data:** pandas, numpy, boto3 (AWS SDK)
-- **Visualization:** matplotlib, seaborn, TensorBoard
-- **Config:** YAML, Hydra (optional)
+- **Python** 3.12
+- **PyTorch** — DQN agent, neural networks
+- **Gymnasium** — RL environment
+- **pandas / numpy** — Data processing
+- **matplotlib** — Visualization
+- **TensorBoard** — Training monitoring
+- **boto3** — AWS Spot Price API
+- **YAML** — Configuration
 
 ---
 
-## Tài liệu tham khảo
+## Metrics đánh giá
 
-### Papers
-1. **DQN:** Mnih et al. (2015) - "Human-level control through deep reinforcement learning"
-2. **Spot Instance Optimization:**
-   - "SpotOn: On-Demand Spot Instances" (NSDI 2020)
-   - "Tributary: Spot-Dancing for Elastic Services" (ATC 2018)
+| Metric | Mô tả | Mục tiêu |
+|--------|--------|----------|
+| **Episode Reward** | Tổng reward mỗi episode | Càng cao càng tốt |
+| **Episode Cost** | Chi phí ($) mỗi episode | Càng thấp càng tốt |
+| **SLA Compliance** | % jobs hoàn thành đúng hạn | ≥ 95% |
+| **Spot Usage** | % dùng spot vs tổng | Cao = tiết kiệm |
+| **Cost Savings** | % tiết kiệm so với toàn On-Demand | Mục tiêu 20-40% |
 
-### AWS Documentation
+---
+
+## Tham khảo
+
+**Papers:**
+- Mnih et al. (2015) — *Human-level control through deep reinforcement learning* (DQN)
+- SpotOn (NSDI 2020) — On-Demand Spot Instances
+- Tributary (ATC 2018) — Elastic Services trên Spot
+
+**AWS:**
 - [EC2 Spot Instances Pricing](https://aws.amazon.com/ec2/spot/pricing/)
 - [Spot Instance Advisor](https://aws.amazon.com/ec2/spot/instance-advisor/)
-- [Boto3 EC2 Spot Price API](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/ec2.html#EC2.Client.describe_spot_price_history)
 
-### Tutorials
-- [Stable Baselines3 DQN Tutorial](https://stable-baselines3.readthedocs.io/en/master/modules/dqn.html)
+**Tutorials:**
+- [PyTorch DQN Tutorial](https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html)
 - [Custom Gymnasium Environments](https://gymnasium.farama.org/tutorials/gymnasium_basics/environment_creation/)
-
----
-
-## Liên hệ & Đóng góp
-
-**Tác giả:** [Tên cậu]
-**Email:** [Email]
-**Giảng viên hướng dẫn:** [Tên giảng viên]
-**Seminar:** MLOps - [Tên trường]
-
-**Contribution guidelines:**
-- Fork repo và tạo feature branch
-- Follow PEP8 coding style
-- Add docstrings cho functions/classes
-- Test code trước khi commit
-
----
-
-## License
-
-MIT License (hoặc Academic Use Only - tùy yêu cầu)
-
----
-
-## Ghi chú kỹ thuật
-
-### Lý do chọn DQN thay vì policy gradient
-- Action space discrete, DQN sample-efficient hơn
-- Off-policy learning: tái sử dụng experience
-- Đơn giản hơn để debug và tune
-
-### Challenges dự kiến
-1. **State representation:** Cần feature engineering tốt (price patterns, time features)
-2. **Reward shaping:** Cân bằng giữa cost saving và SLA penalty
-3. **Non-stationary environment:** Giá spot thay đổi theo thời gian thực
-4. **Exploration:** Epsilon-greedy có thể không đủ, cân nhắc thêm noise
-
-### Extensions có thể làm thêm (nếu có thời gian)
-- [ ] Multi-region optimization (chọn AZ có giá tốt nhất)
-- [ ] LSTM-based Q-network để capture temporal patterns
-- [ ] Prioritized Experience Replay
-- [ ] Double DQN / Dueling DQN
-- [ ] Transfer learning: pre-train trên synthetic data, fine-tune trên real data
