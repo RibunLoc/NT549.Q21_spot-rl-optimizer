@@ -1,0 +1,37 @@
+agent:
+  batch_size: 128
+  epsilon_decay: 80000
+  epsilon_end: 0.02
+  epsilon_start: 1.0
+  gamma: 0.99
+  hidden_dims:
+  - 512
+  - 256
+  - 128
+  learning_rate: 0.0001
+  replay_buffer_size: 200000
+  target_update_freq: 1000
+  type: DQN
+env:
+  data_path: data/processed/multipool_stable.pkl
+  max_steps: 168
+  reward:
+    concentration_penalty: 0.2
+    concentration_threshold: 0.8
+    interrupt_penalty: 0.5
+    migration_penalty: 1.0
+    sla_penalty: 10.0
+  sla_threshold: 0.95
+  type: multi_pool
+  workload:
+    avg_job_duration: 3
+    base_arrival_rate: 15.0
+    peak_multiplier: 2.0
+seed: 42
+training:
+  eval_episodes: 10
+  eval_interval: 100
+  log_interval: 10
+  max_steps_per_episode: 168
+  num_episodes: 3000
+  save_interval: 100

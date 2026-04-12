@@ -22,11 +22,12 @@ class CostCalculator:
     ONDEMAND_PRICE_PER_HOUR = 0.096  # $/giờ
     SPOT_PRICE_REFERENCE = 0.030  # $/giờ (giá spot trung bình)
 
-    # Tham số phạt
-    SLA_PENALTY_PER_FAILED_JOB = 10.0  # $ cho mỗi job thất bại
-    MIGRATION_COST = 1.0  # $ cho mỗi lần migration spot→OD (chi phí downtime)
-    MIGRATION_COST_TO_SPOT = 0.5  # $ cho mỗi lần migration OD→spot (rẻ hơn vì spot khởi tạo nhanh)
-    INTERRUPTION_PENALTY = 5.0  # $ cho mỗi sự kiện bị gián đoạn
+    # Tham số phạt — scale nhỏ để reward nằm trong khoảng [-5, +5] mỗi step
+    # Giúp Q-network học ổn định, tránh loss bùng nổ
+    SLA_PENALTY_PER_FAILED_JOB = 2.0  # $ cho mỗi job thất bại (giảm từ 10)
+    MIGRATION_COST = 0.3  # $ cho mỗi lần migration spot→OD (giảm từ 1.0)
+    MIGRATION_COST_TO_SPOT = 0.15  # $ cho mỗi lần migration OD→spot (giảm từ 0.5)
+    INTERRUPTION_PENALTY = 1.0  # $ cho mỗi sự kiện bị gián đoạn (giảm từ 5.0)
 
     def __init__(
         self,
@@ -116,16 +117,17 @@ class CostCalculator:
         Returns:
             Tiền phạt ($, luôn không âm)
         """
-        if total_jobs == 0:
+        if total_jobs == 0 or failed_jobs == 0:
             return 0.0
 
         compliance = 1.0 - (failed_jobs / total_jobs)
 
         if compliance < sla_threshold:
-            # Phạt tỷ lệ thuận với mức độ vi phạm
-            violation = sla_threshold - compliance
-            penalty = failed_jobs * self.sla_penalty * (1 + violation)
-            return penalty
+            # Phạt tuyến tính: mỗi job fail bị phạt, cộng thêm bonus phạt theo mức vi phạm
+            # Giữ penalty bounded — tránh spike quá lớn trong 1 step
+            violation = sla_threshold - compliance  # 0 → 0.95
+            penalty = failed_jobs * self.sla_penalty * (1.0 + violation * 2.0)
+            return min(penalty, 10.0)  # Cap tối đa $10/step
 
         return 0.0
 

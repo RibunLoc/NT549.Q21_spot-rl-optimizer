@@ -75,3 +75,4 @@ Thumbs.db
 *.csv
 !data/raw/.gitkeep
 !data/processed/.gitkeep
+.claude

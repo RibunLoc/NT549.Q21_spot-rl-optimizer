@@ -19,20 +19,24 @@ def setup_logger(log_file: Optional[Path] = None, level=logging.INFO):
     logger = logging.getLogger()
     logger.setLevel(level)
 
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(level)
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
+
+    # Only add console handler if not already present
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler)
+               for h in logger.handlers):
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level)
+        console_handler.setFormatter(formatter)
+        logger.addHandler(console_handler)
 
     # File handler
     if log_file:
+        log_file = Path(log_file)
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file)
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)

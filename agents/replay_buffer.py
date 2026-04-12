@@ -4,7 +4,6 @@ Experience replay buffer for DQN.
 
 import numpy as np
 from collections import deque
-import random
 
 
 class ReplayBuffer:
@@ -23,6 +22,7 @@ class ReplayBuffer:
         """
         self.capacity = capacity
         self.buffer = deque(maxlen=capacity)
+        self.rng = np.random.default_rng(np.random.randint(0, 2**31))
 
     def add(
         self,
@@ -55,7 +55,8 @@ class ReplayBuffer:
             Tuple of (states, actions, rewards, next_states, dones)
             Each element is a numpy array or list
         """
-        batch = random.sample(self.buffer, batch_size)
+        indices = self.rng.choice(len(self.buffer), size=batch_size, replace=False)
+        batch = [self.buffer[i] for i in indices]
 
         states = np.array([exp[0] for exp in batch])
         actions = np.array([exp[1] for exp in batch])

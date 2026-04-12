@@ -37,10 +37,10 @@ class DQNAgent:
         gamma: float = 0.99,
         epsilon_start: float = 1.0,
         epsilon_end: float = 0.01,
-        epsilon_decay: int = 100000,
+        epsilon_decay: int = 30000,
         batch_size: int = 64,
         buffer_size: int = 100000,
-        target_update_freq: int = 1000,
+        target_update_freq: int = 300,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         """
@@ -85,6 +85,10 @@ class DQNAgent:
         # Replay buffer
         self.replay_buffer = ReplayBuffer(buffer_size)
 
+        # RNG for exploration
+        # Use legacy np.random (seeded via np.random.seed in train.py) to derive a seed
+        self.rng = np.random.default_rng(np.random.randint(0, 2**31))
+
         # Metrics
         self.loss_history = deque(maxlen=100)
 
@@ -103,9 +107,9 @@ class DQNAgent:
         # 1. With probability epsilon, select random action
         # 2. Otherwise, select action with max Q-value
 
-        if training and np.random.random() < self.epsilon:
+        if training and self.rng.random() < self.epsilon:
             # Explore: random action
-            return np.random.randint(self.action_dim)
+            return int(self.rng.integers(self.action_dim))
         else:
             # Exploit: best action according to Q-network
             with torch.no_grad():
@@ -152,6 +156,9 @@ class DQNAgent:
         if len(self.replay_buffer) < self.batch_size:
             return None
 
+        # Ensure training mode (may be off after eval/export)
+        self.q_network.train()
+
         # Sample batch
         batch = self.replay_buffer.sample(self.batch_size)
         states, actions, rewards, next_states, dones = batch
@@ -171,14 +178,14 @@ class DQNAgent:
             next_q_values = self.target_network(next_states).max(1)[0]
             target_q_values = rewards + (1 - dones) * self.gamma * next_q_values
 
-        # Compute loss
-        loss = nn.MSELoss()(current_q_values.squeeze(), target_q_values)
+        # Compute loss — Huber (smooth L1) thay MSE để chống outlier reward
+        loss = nn.SmoothL1Loss()(current_q_values.squeeze(), target_q_values)
 
         # Optimize
         self.optimizer.zero_grad()
         loss.backward()
-        # Gradient clipping (optional)
-        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=10.0)
+        # Gradient clipping chặt hơn để ổn định training
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         # Update epsilon

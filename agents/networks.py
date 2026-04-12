@@ -145,6 +145,83 @@ class LSTMQNetwork(nn.Module):
         return (h0, c0)
 
 
+class BranchingQNetwork(nn.Module):
+    """
+    Branching DQN for composite action space (op × type × az).
+
+    Instead of one head with N_OPS * N_TYPES * N_AZS outputs,
+    uses a shared trunk + 3 separate heads:
+    - op_head: 7 operations
+    - type_head: 5 instance types
+    - az_head: 3 availability zones
+
+    Q(s, a) ≈ V(s) + A_op(s, op) + A_type(s, type) + A_az(s, az)
+
+    This reduces output dimension from 105 to 7+5+3=15,
+    making learning more sample-efficient for large action spaces.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        n_ops: int = 7,
+        n_types: int = 5,
+        n_azs: int = 3,
+        hidden_dims: list = [512, 256, 128],
+    ):
+        super().__init__()
+        self.n_ops = n_ops
+        self.n_types = n_types
+        self.n_azs = n_azs
+
+        # Shared trunk
+        trunk_layers = []
+        in_dim = state_dim
+        for h in hidden_dims:
+            trunk_layers.append(nn.Linear(in_dim, h))
+            trunk_layers.append(nn.ReLU())
+            in_dim = h
+        self.trunk = nn.Sequential(*trunk_layers)
+
+        # Value stream
+        self.value_head = nn.Linear(in_dim, 1)
+
+        # Advantage branches
+        self.op_head = nn.Linear(in_dim, n_ops)
+        self.type_head = nn.Linear(in_dim, n_types)
+        self.az_head = nn.Linear(in_dim, n_azs)
+
+    def forward(self, state: torch.Tensor):
+        """
+        Returns:
+            op_q: (batch, n_ops)
+            type_q: (batch, n_types)
+            az_q: (batch, n_azs)
+            value: (batch, 1)
+        """
+        h = self.trunk(state)
+        value = self.value_head(h)
+
+        op_adv = self.op_head(h)
+        type_adv = self.type_head(h)
+        az_adv = self.az_head(h)
+
+        # Mean-center advantages
+        op_q = value + op_adv - op_adv.mean(dim=1, keepdim=True)
+        type_q = value + type_adv - type_adv.mean(dim=1, keepdim=True)
+        az_q = value + az_adv - az_adv.mean(dim=1, keepdim=True)
+
+        return op_q, type_q, az_q, value
+
+    def select_action(self, state: torch.Tensor) -> tuple:
+        """Select greedy composite action."""
+        op_q, type_q, az_q, _ = self.forward(state)
+        op = op_q.argmax(dim=1)
+        t = type_q.argmax(dim=1)
+        az = az_q.argmax(dim=1)
+        return op, t, az
+
+
 class DuelingQNetwork(nn.Module):
     """
     Dueling Q-network architecture.

@@ -110,6 +110,74 @@ def preprocess_spot_prices(
     return features
 
 
+def preprocess_multi_pool(
+    df: pd.DataFrame,
+    instance_types: list = None,
+    availability_zones: list = None,
+) -> pd.DataFrame:
+    """
+    Preprocess spot price data for multi-pool (type × AZ) environment.
+
+    Returns a single DataFrame with all (type, AZ) combinations,
+    resampled to hourly and aligned on the same timestamps.
+
+    Each row has: timestamp, instance_type, availability_zone, spot_price,
+                  price_ma_1h, price_ma_24h, volatility, est_interruption_prob
+    """
+    logger.info("Preprocessing multi-pool spot prices...")
+
+    df = df.copy()
+    df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', utc=True)
+    df = df.sort_values('timestamp')
+
+    if instance_types is None:
+        instance_types = sorted(df['instance_type'].unique())
+    if availability_zones is None:
+        availability_zones = sorted(df['availability_zone'].unique())
+
+    logger.info(f"  Types: {instance_types}")
+    logger.info(f"  AZs: {availability_zones}")
+
+    all_features = []
+    for itype in instance_types:
+        for az in availability_zones:
+            sub = df[(df['instance_type'] == itype) & (df['availability_zone'] == az)]
+            if len(sub) == 0:
+                logger.warning(f"  No data for {itype} in {az}, skipping")
+                continue
+
+            sub = sub.set_index('timestamp')
+            hourly = sub['spot_price'].resample('1h').mean().interpolate(method='linear').dropna()
+
+            feat = pd.DataFrame(index=hourly.index)
+            feat['spot_price'] = hourly
+            feat['instance_type'] = itype
+            feat['availability_zone'] = az
+            feat['price_ma_1h'] = hourly.rolling(window=1, min_periods=1).mean()
+            feat['price_ma_24h'] = hourly.rolling(window=24, min_periods=1).mean()
+            feat['price_volatility_24h'] = hourly.rolling(window=24, min_periods=2).std().fillna(0)
+            feat['price_trend'] = (hourly / feat['price_ma_24h']).fillna(1.0)
+            feat['est_interruption_prob'] = np.clip(
+                (feat['price_trend'] - 1.0) * 0.5, 0.01, 0.30
+            )
+            feat['hour_of_day'] = feat.index.hour
+            feat['day_of_week'] = feat.index.dayofweek
+
+            feat = feat.reset_index().rename(columns={'index': 'timestamp'})
+            all_features.append(feat)
+
+            logger.info(f"  {itype} @ {az}: {len(feat)} records, "
+                        f"${feat['spot_price'].min():.4f}-${feat['spot_price'].max():.4f}")
+
+    result = pd.concat(all_features, ignore_index=True)
+    result = result.sort_values(['timestamp', 'instance_type', 'availability_zone']).reset_index(drop=True)
+
+    logger.info(f"  Total: {len(result)} records, "
+                f"{len(instance_types)} types × {len(availability_zones)} AZs")
+
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description='Preprocess spot price and workload data')
     parser.add_argument('--input', type=str, default='data/raw/',
@@ -124,6 +192,10 @@ def main():
                         help='Instance type to preprocess')
     parser.add_argument('--az', type=str, default=None,
                         help='Availability zone (default: auto-select)')
+    parser.add_argument('--multi-pool', action='store_true',
+                        help='Multi-pool mode: preprocess all types × AZs')
+    parser.add_argument('--instance-types', type=str, default=None,
+                        help='Comma-separated instance types for multi-pool mode')
 
     args = parser.parse_args()
 
@@ -142,11 +214,20 @@ def main():
     logger.info(f"Loaded {len(spot_df)} total spot price records")
 
     # Preprocess
-    features_df = preprocess_spot_prices(
-        spot_df,
-        instance_type=args.instance_type,
-        availability_zone=args.az,
-    )
+    if args.multi_pool:
+        instance_types = None
+        if args.instance_types:
+            instance_types = [t.strip() for t in args.instance_types.split(',')]
+        features_df = preprocess_multi_pool(
+            spot_df,
+            instance_types=instance_types,
+        )
+    else:
+        features_df = preprocess_spot_prices(
+            spot_df,
+            instance_type=args.instance_type,
+            availability_zone=args.az,
+        )
 
     # Save as both CSV and pickle
     base_name = args.output_name

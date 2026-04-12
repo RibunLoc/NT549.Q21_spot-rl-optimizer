@@ -1,0 +1,37 @@
+# DQN config cho r6i.xlarge — synthetic volatile data
+# spot_capacity=10, ondemand=5, SCALE_STEP=2
+# Khớp với collector.go: maxSpot=10, maxOnDemand=5, maxTotalCap=15
+
+seed: 42
+
+env:
+  data_path: "data/processed/price_features_r6i_volatile.pkl"
+  max_steps: 1000
+  sla_threshold: 0.95
+  spot_capacity: 10
+  ondemand_capacity: 5
+  workload:
+    base_arrival_rate: 1.0
+    peak_multiplier: 2.0
+    avg_job_duration: 3
+  cost:
+    ondemand_price: 0.252    # r6i.xlarge on-demand ap-southeast-1
+    sla_penalty: 1.0
+    migration_cost: 0.2
+
+agent:
+  type: "DQN"
+  learning_rate: 0.0003
+  gamma: 0.99
+  epsilon_start: 1.0
+  epsilon_end: 0.01
+  epsilon_decay: 50000
+  batch_size: 128
+  replay_buffer_size: 100000
+  target_update_freq: 500
+
+training:
+  num_episodes: 3000
+  max_steps_per_episode: 500
+  log_interval: 10
+  save_interval: 100

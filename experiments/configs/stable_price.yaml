@@ -1,5 +1,7 @@
 # Stable price scenario configuration
 
+seed: 42
+
 env:
   data_path: "data/processed/price_features_stable.pkl"
   max_steps: 1000
@@ -9,12 +11,11 @@ env:
   workload:
     base_arrival_rate: 1.5
     peak_multiplier: 2.0
-    peak_hours: [9, 10, 11, 14, 15, 16]
     avg_job_duration: 5
   cost:
     ondemand_price: 0.096
-    sla_penalty: 10.0
-    migration_cost: 1.0
+    sla_penalty: 2.0
+    migration_cost: 0.3
 
 agent:
   type: "DQN"

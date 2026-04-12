@@ -94,7 +94,11 @@ class SpotInstanceEnv(gym.Env):
             if data_path.endswith('.csv'):
                 self.price_data = pd.read_csv(data_path)
             elif data_path.endswith('.pkl'):
-                self.price_data = pd.read_pickle(data_path)
+                try:
+                    self.price_data = pd.read_pickle(data_path)
+                except (NotImplementedError, Exception):
+                    csv_path = data_path.replace('.pkl', '.csv')
+                    self.price_data = pd.read_csv(csv_path)
             else:
                 raise ValueError(f"Unsupported data format: {data_path}")
         else:
@@ -163,10 +167,10 @@ class SpotInstanceEnv(gym.Env):
         ], dtype=np.float32)
 
         self._obs_max = np.array([
-            0.20,                           # current_price (spot rarely > $0.20)
-            0.20,                           # mean_6h
-            0.20,                           # mean_24h
-            0.05,                           # volatility
+            0.50,                           # current_price (r6i spike up to $0.40)
+            0.50,                           # mean_6h
+            0.50,                           # mean_24h
+            0.10,                           # volatility
             1.0,                            # interruption_prob
             float(spot_capacity),           # spot_instances
             float(ondemand_capacity),       # ondemand_instances
@@ -179,6 +183,9 @@ class SpotInstanceEnv(gym.Env):
             6.0,                            # day_of_week
             1.0,                            # progress
         ], dtype=np.float32)
+
+        # Gymnasium RNG (initialized properly in reset(), default for init)
+        self.np_random = np.random.default_rng()
 
         # Internal state
         self._reset_state()
@@ -213,9 +220,11 @@ class SpotInstanceEnv(gym.Env):
         self._reset_state()
         self.episode_history = []
 
-        # Reset simulators
-        self.market_sim.reset(seed=seed)
-        self.workload_gen.reset(seed=seed)
+        # Derive sub-seeds from Gymnasium's np_random for reproducibility
+        # Each component gets a different but deterministic seed
+        sub_seeds = self.np_random.integers(0, 2**31, size=2)
+        self.market_sim.reset(seed=int(sub_seeds[0]))
+        self.workload_gen.reset(seed=int(sub_seeds[1]))
 
         observation = self._get_observation()
         info = self._get_info()
@@ -275,7 +284,7 @@ class SpotInstanceEnv(gym.Env):
         return observation, reward, terminated, truncated, info
 
     # Số instance thay đổi mỗi action (cho agent scale nhanh hơn)
-    SCALE_STEP = 3
+    SCALE_STEP = 2
 
     def _execute_action(self, action: int):
         """Execute the selected action."""
@@ -321,15 +330,17 @@ class SpotInstanceEnv(gym.Env):
         if interrupted and self.num_spot_instances > 0:
             self.num_spot_instances -= 1
             self.num_interruptions += 1
-            # Kill one running job that was on the interrupted spot instance
+            # Kill a random running job (not always the last one)
             if self.running_jobs_list:
-                self.running_jobs_list.pop()
+                idx = self.np_random.integers(len(self.running_jobs_list))
+                self.running_jobs_list.pop(idx)
                 self.failed_jobs += 1
                 self.step_failed_jobs += 1
 
         # 3. Generate new jobs
         new_jobs = self.workload_gen.step()
-        self.pending_jobs += len(new_jobs)
+        # pending_jobs counter always stays in sync with workload_gen.pending_jobs
+        self.pending_jobs = len(self.workload_gen.pending_jobs)
 
         # 4. Tick running jobs — decrement remaining time, complete finished ones
         still_running: List[Job] = []
@@ -352,24 +363,37 @@ class SpotInstanceEnv(gym.Env):
             started = self.workload_gen.pending_jobs[:jobs_to_start]
             self.workload_gen.pending_jobs = self.workload_gen.pending_jobs[jobs_to_start:]
             self.running_jobs_list.extend(started)
-            self.pending_jobs -= jobs_to_start
+            self.pending_jobs = len(self.workload_gen.pending_jobs)
 
         self.running_jobs = len(self.running_jobs_list)
 
         # 6. SLA: jobs waiting too long fail (deadline exceeded)
-        if self.pending_jobs > total_capacity * 3 and self.pending_jobs > 0:
+        if total_capacity > 0 and self.pending_jobs > total_capacity * 3:
             jobs_failed = max(1, self.pending_jobs // 10)
-            self.pending_jobs -= jobs_failed
-            # Also remove from workload generator's pending list
-            self.workload_gen.pending_jobs = self.workload_gen.pending_jobs[:-jobs_failed] if jobs_failed <= len(self.workload_gen.pending_jobs) else []
-            self.failed_jobs += jobs_failed
-            self.step_failed_jobs += jobs_failed
+            # Remove oldest jobs first (front of queue = waited longest)
+            actual_remove = min(jobs_failed, len(self.workload_gen.pending_jobs))
+            self.workload_gen.pending_jobs = self.workload_gen.pending_jobs[actual_remove:]
+            self.pending_jobs = len(self.workload_gen.pending_jobs)
+            self.failed_jobs += actual_remove
+            self.step_failed_jobs += actual_remove
 
         # 7. Track queue wait time
         self.queue_wait_accumulator += self.pending_jobs
 
     def _calculate_reward(self) -> float:
-        """Calculate reward based on costs and penalties."""
+        """
+        Calculate reward — v5 (efficiency-focused).
+
+        Key insight: reward phải phạt CHI PHÍ THẬT mỗi step, không chỉ so sánh
+        vs baseline. Agent phải trade-off: thêm instance = clear queue nhưng tốn tiền.
+
+        Components:
+        - completion_reward: thưởng mỗi job xong (+)
+        - cost_penalty: phạt chi phí thật mỗi step (-)
+        - sla_penalty: phạt job fail (-)
+        - pending_penalty: phạt queue tồn đọng (-)
+        - spot_bonus: thưởng nhỏ khi dùng spot thay OD (+)
+        """
         step_cost = self.cost_calc.compute_step_cost(
             num_spot=self.num_spot_instances,
             num_ondemand=self.num_ondemand_instances,
@@ -379,45 +403,56 @@ class SpotInstanceEnv(gym.Env):
         self.step_cost = step_cost
         self.total_cost += step_cost
 
-        # Savings so với baseline: nếu chạy toàn bộ running + pending jobs
-        # bằng on-demand thì tốn bao nhiêu?
-        jobs_needing_capacity = self.running_jobs + self.pending_jobs
-        baseline_capacity = max(jobs_needing_capacity,
-                                self.num_spot_instances + self.num_ondemand_instances)
-        savings = self.cost_calc.compute_savings_vs_ondemand(
-            actual_cost=step_cost,
-            total_capacity=baseline_capacity,
-            timestep_duration=1.0,
+        total_instances = self.num_spot_instances + self.num_ondemand_instances
+        max_capacity = self.spot_capacity + self.ondemand_capacity
+
+        # === 1. COMPLETION REWARD — signal chính ===
+        # Mỗi job hoàn thành = giá trị kinh doanh
+        completion_reward = self.step_completed_jobs * 1.0
+
+        # === 2. COST PENALTY — agent phải trả chi phí thật ===
+        # Giảm scale để agent dám provision đủ capacity
+        cost_penalty = step_cost * 1.5
+
+        # === 3. SLA PENALTY — job fail = mất doanh thu + uy tín ===
+        # Tăng penalty để agent ưu tiên SLA hơn
+        sla_penalty = self.step_failed_jobs * 5.0
+
+        # === 4. PENDING PENALTY — queue dài = user chờ lâu ===
+        if max_capacity > 0:
+            pending_penalty = min((self.pending_jobs / max_capacity) * 1.0, 3.0)
+        else:
+            pending_penalty = 3.0
+
+        # === 5. SPOT BONUS — khuyến khích spot vì rẻ hơn ===
+        # Chỉ thưởng nhỏ, incentive chính đến từ cost_penalty thấp hơn khi dùng spot
+        if total_instances > 0:
+            spot_ratio = self.num_spot_instances / total_instances
+            spot_bonus = spot_ratio * 0.5  # max +0.5/step
+        else:
+            spot_bonus = 0.0
+
+        # === 6. IDLE PENALTY — không có instance khi có job ===
+        idle_penalty = 3.0 if (total_instances == 0 and self.pending_jobs > 0) else 0.0
+
+        # === 7. INTERRUPTION PENALTY ===
+        interruption_penalty = self.num_interruptions * 1.5
+
+        # === 8. MIGRATION PENALTY ===
+        migration_penalty = self.num_migrations * 0.3 + self.num_migrations_to_spot * 0.15
+
+        reward = (
+            completion_reward
+            + spot_bonus
+            - cost_penalty
+            - sla_penalty
+            - pending_penalty
+            - idle_penalty
+            - interruption_penalty
+            - migration_penalty
         )
 
-        # SLA penalty: dùng số job thực tế trong step này
-        step_total_jobs = self.step_failed_jobs + self.step_completed_jobs
-        sla_penalty = self.cost_calc.compute_sla_penalty(
-            failed_jobs=self.step_failed_jobs,
-            total_jobs=step_total_jobs,
-            sla_threshold=self.sla_threshold,
-        )
-
-        migration_penalty = self.cost_calc.compute_migration_penalty(
-            num_migrations=self.num_migrations,
-        ) + self.num_migrations_to_spot * self.cost_calc.migration_cost_to_spot
-
-        interruption_penalty = self.cost_calc.compute_interruption_penalty(
-            num_interruptions=self.num_interruptions,
-        )
-
-        reward = self.cost_calc.compute_total_reward(
-            step_cost=step_cost,
-            savings=savings,
-            sla_penalty=sla_penalty,
-            migration_penalty=migration_penalty,
-            interruption_penalty=interruption_penalty,
-        )
-
-        # Phạt thêm cho pending jobs cao (khuyến khích agent giữ queue thấp)
-        pending_penalty = self.pending_jobs * 0.1
-
-        return reward - pending_penalty
+        return float(np.clip(reward, -10.0, 10.0))
 
     def _get_observation(self) -> np.ndarray:
         """Build state vector from current state."""
