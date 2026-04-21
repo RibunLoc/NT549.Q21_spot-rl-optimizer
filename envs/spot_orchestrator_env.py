@@ -2,8 +2,8 @@
 Multi-Type × Multi-AZ Cost-Aware Spot Instance Orchestrator Environment.
 
 MDP:
-- State: 33 features (hybrid top-3 cheapest + aggregated + infra + workload + time)
-- Action: 105 discrete (7 ops × 5 types × 3 AZs)
+- State: 42 features (hybrid top-3 cheapest + aggregated + infra + workload + time + extra context)
+- Action: 135 discrete (9 ops × 5 types × 3 AZs)
 - Reward: savings-based (baseline_OD - actual_cost - penalties)
 
 Agent learns to choose: which operation, which instance type, which AZ
@@ -18,11 +18,13 @@ from typing import Dict, List, Tuple, Any, Optional
 from dataclasses import dataclass, field
 
 from envs.instance_catalog import (
-    INSTANCE_TYPES, AVAILABILITY_ZONES, N_TYPES, N_AZS, N_OPS, N_ACTIONS,
+    INSTANCE_TYPES, AVAILABILITY_ZONES, N_TYPES, N_AZS,
     STATE_DIM, MAX_INSTANCES, MAX_PER_AZ, MAX_VCPU, MAX_JOBS, MAX_WAIT,
-    OP_REQUEST_SPOT, OP_REQUEST_ONDEMAND, OP_TERMINATE_SPOT,
-    OP_TERMINATE_ONDEMAND, OP_MIGRATE_TO_ONDEMAND, OP_MIGRATE_TO_SPOT,
-    OP_DO_NOTHING, OP_NAMES, decode_action, get_od_price, get_max_od_price,
+    get_od_price, get_max_od_price,
+)
+from envs.action_schema import (
+    Operation, N_ACTIONS, HOLD_ACTION, OPERATION_NAMES,
+    decode_action, encode_action,
 )
 from envs.market_simulator import MultiPoolMarketSimulator
 from envs.workload_generator import WorkloadGenerator, Job
@@ -167,6 +169,27 @@ class SpotOrchestratorEnv(gym.Env):
         # Action counts
         self.action_counts = np.zeros(N_ACTIONS, dtype=int)
 
+        # Extra state tracking (for new features [33-41])
+        self.interrupt_history: List[int] = []      # interrupt count per step (last 10)
+        self.pending_history: List[int] = []        # pending jobs per step (last 5)
+        self.step_migrate_spot_to_spot = False      # for reward bonus
+        self.step_unnecessary_od = False            # for unnecessary OD penalty
+        self.step_reserved_capacity = False         # v2: proactive RESERVE_CAPACITY bonus
+        self.baseline_od_cost_per_step = sum(       # full OD cost baseline (per step)
+            t.ondemand_price for t in INSTANCE_TYPES
+        )
+
+        # Per-pool resource tracking (for state features [42-71])
+        self.pool_running_jobs: Dict[Tuple[int, int], int] = {
+            (t, az): 0 for t in range(N_TYPES) for az in range(N_AZS)
+        }
+        self.pool_cpu_util: Dict[Tuple[int, int], float] = {
+            (t, az): 0.0 for t in range(N_TYPES) for az in range(N_AZS)
+        }
+        self.pool_ram_util: Dict[Tuple[int, int], float] = {
+            (t, az): 0.0 for t in range(N_TYPES) for az in range(N_AZS)
+        }
+
     def reset(
         self, seed: int = None, options: Dict[str, Any] = None
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -216,66 +239,75 @@ class SpotOrchestratorEnv(gym.Env):
     # ──────────────────────────────────────────────
 
     def _execute_action(self, action: int):
-        """Execute composite action (op, type, az)."""
+        """Execute pool-targeted operation using v2 action schema.
+
+        Operations:
+          PROVISION_SPOT / PROVISION_ONDEMAND  — add capacity
+          RELEASE_SPOT / RELEASE_ONDEMAND      — remove capacity
+          CONVERT_TO_SPOT / CONVERT_TO_OD      — swap billing (same pool)
+          REBALANCE_SPOT                       — move spot from expensive pool here
+          RESERVE_CAPACITY                     — preemptive OD when interrupt risk high
+          HOLD                                 — no-op
+        """
         op, type_idx, az_idx = decode_action(action)
         pool = self.pools[(type_idx, az_idx)]
 
-        self.step_wasted_action = False   # reset per action
-        self.step_migrate_to_spot = False  # reset per action
+        # Reset per-step action flags
+        self.step_wasted_action = False
+        self.step_migrate_to_spot = False
+        self.step_migrate_spot_to_spot = False
+        self.step_unnecessary_od = False
+        self.step_reserved_capacity = False  # NEW in v2
 
-        if op == OP_REQUEST_SPOT:
-            # Block nếu hệ thống đã idle >= 3 steps liên tiếp (pending=0, running=0)
-            if self.idle_streak >= 3:
+        # Shortcuts
+        total_instances = self._total_instances()
+        total_vcpu = max(self._total_vcpu(), 1)
+        at_capacity = total_instances >= MAX_INSTANCES or self._az_instances(az_idx) >= MAX_PER_AZ
+
+        if op == Operation.PROVISION_SPOT:
+            # Block khi đã idle >= 3 steps liên tiếp (không có workload)
+            if self.idle_streak >= 3 or at_capacity:
                 self.step_wasted_action = True
-            elif self._total_instances() < MAX_INSTANCES and self._az_instances(az_idx) < MAX_PER_AZ:
+            else:
                 pool.spot_count += 1
-            else:
-                self.step_wasted_action = True  # at cap already
 
-        elif op == OP_REQUEST_ONDEMAND:
-            # Same guard: block request khi hoàn toàn idle
-            if self.idle_streak >= 3:
+        elif op == Operation.PROVISION_ONDEMAND:
+            if self.idle_streak >= 3 or at_capacity:
                 self.step_wasted_action = True
-            elif self._total_instances() < MAX_INSTANCES and self._az_instances(az_idx) < MAX_PER_AZ:
+            else:
                 pool.ondemand_count += 1
-            else:
-                self.step_wasted_action = True
 
-        elif op == OP_TERMINATE_SPOT:
-            # Block nếu workload đang cao — utilization > 70% hoặc pending > 20% vcpu
-            total_vcpu = max(self._total_vcpu(), 1)
-            util = self.running_jobs / total_vcpu
-            if util > 0.7 or self.pending_jobs > total_vcpu * 0.2:
-                self.step_wasted_action = True  # đang cần capacity, không terminate
+        elif op == Operation.RELEASE_SPOT:
+            # Block khi pending > 80% capacity (agent đang overload)
+            if self.pending_jobs > total_vcpu * 0.8:
+                self.step_wasted_action = True
             elif pool.spot_count > 0:
                 pool.spot_count -= 1
             else:
                 self.step_wasted_action = True
 
-        elif op == OP_TERMINATE_ONDEMAND:
-            total_vcpu = max(self._total_vcpu(), 1)
-            util = self.running_jobs / total_vcpu
-            if util > 0.7 or self.pending_jobs > total_vcpu * 0.2:
-                self.step_wasted_action = True  # đang cần capacity, không terminate
+        elif op == Operation.RELEASE_ONDEMAND:
+            if self.pending_jobs > total_vcpu * 0.8:
+                self.step_wasted_action = True
             elif pool.ondemand_count > 0:
                 pool.ondemand_count -= 1
             else:
                 self.step_wasted_action = True
 
-        elif op == OP_MIGRATE_TO_ONDEMAND:
-            if pool.spot_count > 0 and self._total_instances() < MAX_INSTANCES:
+        elif op == Operation.CONVERT_TO_ONDEMAND:
+            # Spot → OD: stabilize when interrupt risk high. Always counts as migration.
+            if pool.spot_count > 0 and total_instances < MAX_INSTANCES:
                 pool.spot_count -= 1
                 pool.ondemand_count += 1
                 self.step_migrations += 1
             else:
                 self.step_wasted_action = True
 
-        elif op == OP_MIGRATE_TO_SPOT:
-            # Block nếu workload đang quá cao — spot có thể bị interrupt lúc peak
-            total_vcpu = max(self._total_vcpu(), 1)
+        elif op == Operation.CONVERT_TO_SPOT:
+            # OD → spot: opportunistic savings. Block khi peak workload.
             util = self.running_jobs / total_vcpu
             if util > 0.8 and self.pending_jobs > 0:
-                self.step_wasted_action = True  # quá rủi ro khi migrate lúc peak
+                self.step_wasted_action = True  # unsafe at peak
             elif pool.ondemand_count > 0:
                 pool.ondemand_count -= 1
                 pool.spot_count += 1
@@ -284,8 +316,63 @@ class SpotOrchestratorEnv(gym.Env):
             else:
                 self.step_wasted_action = True
 
-        elif op == OP_DO_NOTHING:
-            pass
+        elif op == Operation.REBALANCE_SPOT:
+            # Move 1 spot from most-expensive pool → (type_idx, az_idx).
+            # Requires: dst ≥15% cheaper than src, capacity available.
+            dst_price = self.market_sim.get_pool_price(type_idx, az_idx)
+            src_key, src_price = None, -1.0
+            for (t, az), p in self.pools.items():
+                if p.spot_count > 0 and (t, az) != (type_idx, az_idx):
+                    price = self.market_sim.get_pool_price(t, az)
+                    if price > src_price:
+                        src_price, src_key = price, (t, az)
+
+            if src_key is None or src_price <= 0:
+                self.step_wasted_action = True  # no source
+            elif dst_price >= src_price * 0.85:
+                self.step_wasted_action = True  # savings < 15%
+            elif at_capacity:
+                self.step_wasted_action = True
+            else:
+                self.pools[src_key].spot_count -= 1
+                pool.spot_count += 1
+                self.step_migrations += 1
+                self.step_migrate_spot_to_spot = True
+
+        elif op == Operation.RESERVE_CAPACITY:
+            # Preemptive OD: allowed only when P(interrupt) high OR SLA at risk.
+            # Replaces old OP_REQUEST_OD_EMERGENCY with a cleaner intent-based semantic:
+            # "I anticipate spot loss → reserve OD backup NOW".
+            pool_interrupt = self.market_sim.get_pool_interrupt_prob(type_idx, az_idx)
+            avg_interrupt = float(np.mean([
+                self.market_sim.get_pool_interrupt_prob(t, az)
+                for (t, az) in self.pools
+            ]))
+            sla_risk = min(self.pending_jobs / (total_vcpu * 0.5), 1.0)
+            spot_at_risk = sum(
+                p.spot_count for (t, az), p in self.pools.items()
+                if self.market_sim.get_pool_interrupt_prob(t, az) > 0.5
+            )
+
+            # Justification: reserve only if (high interrupt pressure) OR (SLA at risk)
+            # OR (agent holds spot in high-risk pools)
+            justified = (
+                avg_interrupt >= 0.35
+                or sla_risk >= 0.5
+                or spot_at_risk >= 2
+                or pool_interrupt >= 0.5
+            )
+            if not justified:
+                self.step_wasted_action = True
+                self.step_unnecessary_od = True
+            elif at_capacity:
+                self.step_wasted_action = True
+            else:
+                pool.ondemand_count += 1
+                self.step_reserved_capacity = True
+
+        elif op == Operation.HOLD:
+            pass  # no-op
 
     # ──────────────────────────────────────────────
     #  Timestep simulation
@@ -302,10 +389,16 @@ class SpotOrchestratorEnv(gym.Env):
             if interrupted and pool.spot_count > 0:
                 pool.spot_count -= 1
                 self.step_interruptions += 1
-                # Kill a running job
+                # Kill a running job — prefer job on this pool
                 if self.running_jobs_list:
-                    idx = self.np_random.integers(len(self.running_jobs_list))
-                    self.running_jobs_list.pop(idx)
+                    pool_jobs = [i for i, j in enumerate(self.running_jobs_list)
+                                 if j.pool == (t_idx, az_idx)]
+                    idx = pool_jobs[0] if pool_jobs else int(self.np_random.integers(len(self.running_jobs_list)))
+                    killed_job = self.running_jobs_list.pop(idx)
+                    if killed_job.pool is not None:
+                        self.pool_running_jobs[killed_job.pool] = max(
+                            0, self.pool_running_jobs[killed_job.pool] - 1
+                        )
                     self.failed_jobs += 1
                     self.step_failed_jobs += 1
 
@@ -320,6 +413,10 @@ class SpotOrchestratorEnv(gym.Env):
             if job.remaining_time <= 0:
                 self.completed_jobs += 1
                 self.step_completed_jobs += 1
+                if job.pool is not None:
+                    self.pool_running_jobs[job.pool] = max(
+                        0, self.pool_running_jobs[job.pool] - 1
+                    )
             else:
                 still_running.append(job)
         self.running_jobs_list = still_running
@@ -333,10 +430,44 @@ class SpotOrchestratorEnv(gym.Env):
             jobs_to_start = min(self.pending_jobs, free_slots)
             started = self.workload_gen.pending_jobs[:jobs_to_start]
             self.workload_gen.pending_jobs = self.workload_gen.pending_jobs[jobs_to_start:]
+
+            # Assign each job to pool with most free capacity
+            pool_free = {}
+            for (t, az), pool in self.pools.items():
+                pool_vcpu = (pool.spot_count + pool.ondemand_count) * INSTANCE_TYPES[t].vcpus
+                pool_free[(t, az)] = max(0, pool_vcpu - self.pool_running_jobs[(t, az)])
+
+            for job in started:
+                # Pick pool with most free slots
+                best_pool = max(pool_free, key=lambda k: pool_free[k]) if pool_free else None
+                if best_pool and pool_free[best_pool] > 0:
+                    job.pool = best_pool
+                    self.pool_running_jobs[best_pool] += 1
+                    pool_free[best_pool] -= 1
+
             self.running_jobs_list.extend(started)
             self.pending_jobs = len(self.workload_gen.pending_jobs)
 
         self.running_jobs = len(self.running_jobs_list)
+
+        # Recompute per-pool CPU + RAM utilization
+        pool_cpu_sum = {k: 0.0 for k in self.pool_running_jobs}
+        pool_ram_sum = {k: 0.0 for k in self.pool_running_jobs}
+        for job in self.running_jobs_list:
+            if job.pool is not None:
+                pool_cpu_sum[job.pool] += job.cpu_demand
+                pool_ram_sum[job.pool] += job.ram_demand
+
+        for (t, az) in self.pools:
+            pool = self.pools[(t, az)]
+            pool_vcpu = (pool.spot_count + pool.ondemand_count) * INSTANCE_TYPES[t].vcpus
+            pool_ram = (pool.spot_count + pool.ondemand_count) * INSTANCE_TYPES[t].memory_gb
+            self.pool_cpu_util[(t, az)] = (
+                pool_cpu_sum[(t, az)] / max(pool_vcpu, 1e-6)
+            )
+            self.pool_ram_util[(t, az)] = (
+                pool_ram_sum[(t, az)] / max(pool_ram, 1e-6)
+            )
 
         # Update idle streak (sau khi workload đã được update)
         if self.pending_jobs == 0 and self.running_jobs == 0:
@@ -361,6 +492,14 @@ class SpotOrchestratorEnv(gym.Env):
         self.sla_window.append((self.step_completed_jobs, self.step_failed_jobs))
         if len(self.sla_window) > 10:
             self.sla_window.pop(0)
+
+        # Track interrupt and pending history for new state features
+        self.interrupt_history.append(self.step_interruptions)
+        if len(self.interrupt_history) > 10:
+            self.interrupt_history.pop(0)
+        self.pending_history.append(self.pending_jobs)
+        if len(self.pending_history) > 5:
+            self.pending_history.pop(0)
 
         # 9. Compute step cost
         self.step_cost = 0.0
@@ -404,142 +543,110 @@ class SpotOrchestratorEnv(gym.Env):
 
     def _calculate_reward(self) -> float:
         """
-        Savings-based reward (no double-counting).
+        Clean reward function — 5 terms chính, không trùng lặp mục đích.
 
-        R = savings - sla_penalty - interrupt_penalty - migration_cost - concentration_penalty
+        Mục tiêu: tiết kiệm cost + SLA >= 95%
+
+        R = cost_efficiency     # reward chính: dùng ít tiền hơn baseline OD lý thuyết
+            - sla_penalty       # phạt khi job failed
+            - interrupt_penalty # phạt khi spot bị interrupt
+            - stability_penalty # phạt churn/wasted action/concentration (gộp)
+            + smart_bonus       # thưởng migrate_to_spot + spot_to_spot rebalance
         """
-        # Baseline: what it would cost if all current capacity were on-demand
         total_instances = self._total_instances()
-        if total_instances > 0:
-            # Baseline = each instance at its type's OD price
-            baseline_cost = 0.0
-            for (t_idx, az_idx), pool in self.pools.items():
-                od_price = INSTANCE_TYPES[t_idx].ondemand_price
-                baseline_cost += (pool.spot_count + pool.ondemand_count) * od_price
-            savings = baseline_cost - self.step_cost
-        else:
-            savings = 0.0
+        total_cap = max(1, self._total_vcpu())
 
-        # SLA penalty
+        # ═══ 1. COST EFFICIENCY (reward chính) ═══
+        # Baseline = chi phí OD tối thiểu cho workload hiện tại
+        # dùng cheapest type (m5.large $0.096/h) × số job cần serve
+        cheapest_od = min(t.ondemand_price for t in INSTANCE_TYPES)
+        jobs_to_serve = max(self.running_jobs + self.pending_jobs, 1)
+        jobs_to_serve = min(jobs_to_serve, MAX_INSTANCES)  # cap
+        baseline_cost = jobs_to_serve * cheapest_od
+
+        # Nếu không có job → không cần instance → baseline = 0 → step_cost = penalty thuần
+        if self.running_jobs == 0 and self.pending_jobs == 0:
+            baseline_cost = 0.0
+
+        cost_efficiency = baseline_cost - self.step_cost  # có thể âm nếu overprov
+
+        # ═══ 2. SLA PENALTY ═══
         sla_penalty = self.step_failed_jobs * self.sla_penalty_coeff
 
-        # Interrupt penalty
+        # Pending penalty (underprovisioning): scale theo số job đang chờ
+        if self.pending_jobs > 0 and total_instances == 0:
+            pending_penalty = 3.0  # idle khi có job → rất tệ
+        elif self.pending_jobs > total_cap * 0.3:
+            pending_penalty = 1.0  # over capacity by >30% → thiếu
+        else:
+            pending_penalty = 0.0
+
+        # ═══ 3. INTERRUPT PENALTY ═══
         interrupt_penalty = self.step_interruptions * self.interrupt_penalty_coeff
 
-        # Migration penalty — migrate về spot không bị phạt (khuyến khích)
-        # chỉ phạt migrate sang OD (tốn tiền hơn)
-        if self.step_migrate_to_spot:
-            migration_penalty = 0.0   # không phạt migrate về spot
-        else:
-            migration_penalty = self.step_migrations * self.migration_penalty_coeff
+        # ═══ 4. STABILITY PENALTY (gộp: wasted + churn + concentration) ═══
+        stability_penalty = 0.0
 
-        # Concentration penalty: only if >80% in single AZ
-        concentration_penalty = 0.0
-        if total_instances > 0:
+        # Wasted action (request vô ích khi idle, terminate pool rỗng, etc.)
+        if self.step_wasted_action:
+            if self.idle_streak >= 6:
+                stability_penalty += 2.0
+            elif self.idle_streak >= 3:
+                stability_penalty += 1.0
+            else:
+                stability_penalty += 0.3
+
+        # Churn (flip-flop request/terminate)
+        if self.churn_streak >= 2:
+            stability_penalty += (self.churn_streak - 1) * 0.3
+
+        # Concentration (dồn quá nhiều vào 1 AZ)
+        if total_instances > 3:  # chỉ phạt khi có >3 instances
             az_counts = np.zeros(N_AZS)
-            for (t_idx, az_idx), pool in self.pools.items():
+            for (_, az_idx), pool in self.pools.items():
                 az_counts[az_idx] += pool.spot_count + pool.ondemand_count
             concentration = float(np.max(az_counts)) / total_instances
             if concentration > self.concentration_threshold:
-                concentration_penalty = self.concentration_penalty_coeff * (
-                    concentration - self.concentration_threshold
-                )
+                stability_penalty += (concentration - self.concentration_threshold) * 2.0
 
-        # Pending penalty — encourage provisioning
-        pending_penalty = 0.0
-        total_cap = max(1, self._total_vcpu())
-        if self.pending_jobs > 0:
-            pending_penalty = min((self.pending_jobs / total_cap) * 2.0, 5.0)
+        # Migration cost (trừ khi migrate về spot — đó là hành vi tốt)
+        if self.step_migrations > 0 and not self.step_migrate_to_spot \
+                and not self.step_migrate_spot_to_spot:
+            stability_penalty += self.step_migrations * self.migration_penalty_coeff
 
-        # Idle penalty — no instances but jobs waiting
-        idle_penalty = 0.0
-        if total_instances == 0 and self.pending_jobs > 0:
-            idle_penalty = 5.0
+        # Unnecessary OD emergency
+        if self.step_unnecessary_od:
+            stability_penalty += 1.5
 
-        # Wasted action penalty — discourage no-op terminate/migrate
-        # Phạt nặng hơn khi idle_streak cao (liên tục request khi không có job)
-        if self.step_wasted_action:
-            if self.idle_streak >= 6:
-                wasted_penalty = 1.5   # idle lâu mà vẫn request → phạt nặng
-            elif self.idle_streak >= 3:
-                wasted_penalty = 0.8
-            else:
-                wasted_penalty = 0.3
-        else:
-            wasted_penalty = 0.0
-
-        # Overprovisioning penalty — penalize excess idle capacity
-        # Scaled by actual cost of idle instances, not just ratio
-        overprov_penalty = 0.0
-        if total_cap > 0 and self.running_jobs >= 0:
-            idle_vcpu = total_cap - self.running_jobs
-            idle_ratio = idle_vcpu / total_cap
-            if idle_ratio > 0.5:  # >50% idle
-                overprov_penalty = (idle_ratio - 0.5) * (idle_vcpu / 40.0) * 1.5
-
-        # Workload-capacity mismatch penalty
-        # Phạt khi số instance KHÔNG phù hợp với workload thực tế:
-        # - Quá nhiều instance so với workload thấp (lãng phí tiền)
-        # - Quá ít instance so với workload cao (SLA risk)
-        mismatch_penalty = 0.0
-        if total_cap > 0:
-            util = self.running_jobs / total_cap
-            ideal_vcpu = max(self.running_jobs + self.pending_jobs, 1) * 1.3  # buffer 30%
-            actual_vcpu = float(total_cap)
-            if actual_vcpu > ideal_vcpu * 2.0 and self.pending_jobs == 0:
-                # Quá thừa: actual > 2x ideal và không có pending → phạt theo mức dư
-                excess_ratio = (actual_vcpu - ideal_vcpu) / actual_vcpu
-                mismatch_penalty = excess_ratio * 1.5
-            elif actual_vcpu < ideal_vcpu * 0.5 and self.pending_jobs > 10:
-                # Quá thiếu: actual < 50% ideal và pending nhiều → phạt nhẹ (pending_penalty đã cover)
-                mismatch_penalty = 0.5
-
-        # Stability reward — phạt khi request/terminate xen kẽ (churn)
-        # churn_streak=2: 3 bước xen kẽ liên tiếp → phạt 0.4
-        # churn_streak=3: 4 bước xen kẽ liên tiếp → phạt 0.8 (rất đau)
-        churn_penalty = 0.0
-        if self.churn_streak >= 2:
-            churn_penalty = (self.churn_streak - 1) * 0.4
-
-        # Migrate-back bonus — thưởng khi MIGRATE_TO_SPOT sau period có OD
-        # Chỉ thưởng nếu: đang thực sự migrate về spot VÀ đã có OD >= 2 steps
-        migrate_back_bonus = 0.0
+        # ═══ 5. SMART BONUS (proactive good behaviors) ═══
+        smart_bonus = 0.0
+        # a) CONVERT_TO_SPOT khi market ổn (migrate back sau phase OD)
         if self.step_migrate_to_spot and self.steps_since_migrate_to_od >= 2:
-            avg_interr = np.mean([
-                self.market_sim.get_pool_interrupt_prob(t_idx, az_idx)
-                for (t_idx, az_idx) in self.pools
-            ])
-            if avg_interr < 0.15:   # spot đang ổn định → thưởng mạnh
-                migrate_back_bonus = 2.0
-            elif avg_interr < 0.25:
-                migrate_back_bonus = 1.0
-            else:
-                migrate_back_bonus = 0.3  # vẫn thưởng nhẹ dù interrupt cao
+            avg_interr = float(np.mean([
+                self.market_sim.get_pool_interrupt_prob(t, az)
+                for (t, az) in self.pools
+            ]))
+            if avg_interr < 0.2:
+                smart_bonus += 1.0
+        # b) REBALANCE_SPOT: thưởng khi move sang pool rẻ hơn
+        if self.step_migrate_spot_to_spot:
+            smart_bonus += 0.5
+        # c) RESERVE_CAPACITY justified: thưởng nhỏ vì reserve đúng lúc (phòng interrupt).
+        # Agent học dùng action này proactively thay vì reactive sau khi SLA đã fail.
+        if self.step_reserved_capacity:
+            smart_bonus += 0.7
 
-        # Cost-efficiency bonus — thưởng khi savings/cost ratio cao
-        # Khuyến khích dùng spot rẻ thay vì OD
-        efficiency_bonus = 0.0
-        if self.step_cost > 0 and savings > 0:
-            efficiency_ratio = savings / self.step_cost  # spot savings vs actual cost
-            if efficiency_ratio > 0.3:   # tiết kiệm > 30% so với full OD
-                efficiency_bonus = min(efficiency_ratio * 0.5, 1.0)
-
+        # ═══ TỔNG ═══
         reward = (
-            savings
+            cost_efficiency
             - sla_penalty
-            - interrupt_penalty
-            - migration_penalty
-            - concentration_penalty
             - pending_penalty
-            - idle_penalty
-            - wasted_penalty
-            - overprov_penalty
-            - churn_penalty
-            - mismatch_penalty
-            + migrate_back_bonus
-            + efficiency_bonus
+            - interrupt_penalty
+            - stability_penalty
+            + smart_bonus
         )
 
+        # Clip nhẹ để tránh outlier (baseline có thể up to 20 × 0.096 = 1.92)
         return float(np.clip(reward, -20.0, 20.0))
 
     # ──────────────────────────────────────────────
@@ -707,6 +814,98 @@ class SpotOrchestratorEnv(gym.Env):
             sla_health = 1.0
         features.append(np.clip(sla_health, 0, 1.0))  # [32]
 
+        # [33-41] Extra context features
+        # [33] budget_spent_ratio: tổng chi phí so với baseline full OD
+        baseline_od_total = self.baseline_od_cost_per_step * max(self.current_step, 1)
+        budget_spent_ratio = np.clip(self.total_cost / max(baseline_od_total, 1e-6), 0.0, 2.0) / 2.0
+        features.append(float(budget_spent_ratio))
+
+        # [34] idle_spot_vcpu_ratio: spot vCPU đang bị lãng phí
+        total_spot_vcpu = sum(
+            self.pools[(t, az)].spot_count * INSTANCE_TYPES[t].vcpus
+            for t in range(N_TYPES) for az in range(N_AZS)
+        )
+        idle_spot_vcpu = max(0, total_spot_vcpu - self.running_jobs)
+        idle_spot_ratio = idle_spot_vcpu / max(MAX_VCPU, 1)
+        features.append(np.clip(idle_spot_ratio, 0.0, 1.0))
+
+        # [35] workload_trend: pending jobs đang tăng hay giảm (so với 5 steps trước)
+        if len(self.pending_history) >= 2:
+            trend = (self.pending_jobs - self.pending_history[0]) / max(MAX_JOBS, 1)
+        else:
+            trend = 0.0
+        features.append(np.clip((trend + 1.0) / 2.0, 0.0, 1.0))  # shift to [0,1]
+
+        # [36] interrupt_streak_rate: tần suất interrupt trong 10 steps gần nhất
+        interrupt_rate = (
+            sum(self.interrupt_history[-10:]) / max(len(self.interrupt_history), 1)
+        )
+        features.append(np.clip(interrupt_rate, 0.0, 1.0))
+
+        # [37] current_pool_price_ratio: giá trung bình của các pool đang chạy / max OD
+        running_spot_pools = [
+            (t, az) for (t, az), p in self.pools.items() if p.spot_count > 0
+        ]
+        if running_spot_pools:
+            avg_running_price = np.mean([
+                self.market_sim.get_pool_price(t, az) for (t, az) in running_spot_pools
+            ])
+            features.append(np.clip(avg_running_price / max(max_od, 1e-6), 0.0, 1.0))
+        else:
+            features.append(0.0)
+
+        # [38] price_trend_top1: giá pool rẻ nhất đang tăng hay giảm
+        # trend ∈ [-1, 1]: dương = giá đang tăng, âm = đang giảm → shift về [0, 1]
+        if pool_data:
+            top1 = pool_data[0]
+            sim = self.market_sim.sims[(top1['type_idx'], top1['az_idx'])]
+            trend_val = sim._compute_trend()  # ∈ [-1, 1]
+            features.append(np.clip((trend_val + 1.0) / 2.0, 0.0, 1.0))
+        else:
+            features.append(0.5)
+
+        # [39] cheaper_spot_available: có pool spot rẻ hơn ≥15% pool đang chạy nhiều nhất?
+        most_expensive_running = 0.0
+        for (t, az), p in self.pools.items():
+            if p.spot_count > 0:
+                most_expensive_running = max(
+                    most_expensive_running, self.market_sim.get_pool_price(t, az)
+                )
+        cheaper_available = 0.0
+        if most_expensive_running > 0:
+            for p_data in pool_data:
+                if p_data['price'] < most_expensive_running * 0.85:
+                    cheaper_available = 1.0
+                    break
+        features.append(cheaper_available)
+
+        # [40] od_spot_price_gap: OD đắt hơn spot bao nhiêu % (trung bình)
+        if total_spot > 0:
+            avg_spot = sum(
+                self.market_sim.get_pool_price(t, az) * self.pools[(t, az)].spot_count
+                for (t, az) in self.pools if self.pools[(t, az)].spot_count > 0
+            ) / total_spot
+            avg_od_price = np.mean([t.ondemand_price for t in INSTANCE_TYPES])
+            od_gap = np.clip((avg_od_price - avg_spot) / max(avg_od_price, 1e-6), 0.0, 1.0)
+        else:
+            od_gap = 0.5  # neutral khi không có spot
+        features.append(float(od_gap))
+
+        # [41] sla_risk_score: nguy cơ SLA vi phạm sắp tới (nhìn về tương lai gần)
+        total_vcpu_cap = max(self._total_vcpu(), 1)
+        sla_risk = min(self.pending_jobs / (total_vcpu_cap * 0.5), 1.0)
+        features.append(np.clip(sla_risk, 0.0, 1.0))
+
+        # [42-56] Per-pool CPU utilization (15 features: N_TYPES × N_AZS)
+        for t in range(N_TYPES):
+            for az in range(N_AZS):
+                features.append(np.clip(self.pool_cpu_util.get((t, az), 0.0), 0.0, 1.0))
+
+        # [57-71] Per-pool RAM utilization (15 features: N_TYPES × N_AZS)
+        for t in range(N_TYPES):
+            for az in range(N_AZS):
+                features.append(np.clip(self.pool_ram_util.get((t, az), 0.0), 0.0, 1.0))
+
         obs = np.array(features, dtype=np.float32)
         return np.clip(obs, 0.0, 1.0)
 
@@ -777,6 +976,90 @@ class SpotOrchestratorEnv(gym.Env):
             "type_distribution": type_dist,
             "az_distribution": az_dist,
         }
+
+    def get_action_mask(self) -> np.ndarray:
+        """Boolean mask [N_ACTIONS] — True = action valid in current state.
+
+        Mask encodes hard constraints (pool empty, at capacity, price invalid).
+        Soft preferences (churn, idle) are handled via reward.
+
+        Invalid rules per op:
+          PROVISION_SPOT/OD:      pool_full OR capacity_saturated
+          RELEASE_SPOT/OD:        corresponding count == 0
+          CONVERT_TO_ONDEMAND:    pool has no spot
+          CONVERT_TO_SPOT:        pool has no OD, OR spot_price >= od_price
+          REBALANCE_SPOT:         pool has no spot (source), OR at_capacity
+          RESERVE_CAPACITY:       at_capacity, OR no interrupt/SLA justification
+          HOLD:                   always valid
+        """
+        mask = np.ones(N_ACTIONS, dtype=bool)
+        total_instances = self._total_instances()
+        total_cap = max(self._total_vcpu(), 1)
+        needed = max(self.running_jobs + self.pending_jobs, 0)
+
+        # Capacity guard: block PROVISION when we already have 1.5× headroom
+        capacity_saturated = (total_cap >= needed * 1.5 and needed > 0) or \
+                             (total_instances >= 3 and needed == 0)
+
+        # RESERVE_CAPACITY global justification
+        avg_interrupt = float(np.mean([
+            self.market_sim.get_pool_interrupt_prob(t, az)
+            for t in range(N_TYPES) for az in range(N_AZS)
+        ]))
+        sla_risk = min(self.pending_jobs / (total_cap * 0.5), 1.0)
+        spot_at_risk = sum(
+            p.spot_count for (t, az), p in self.pools.items()
+            if self.market_sim.get_pool_interrupt_prob(t, az) > 0.5
+        )
+        reserve_justified_globally = (
+            avg_interrupt >= 0.35 or sla_risk >= 0.5 or spot_at_risk >= 2
+        )
+
+        for t in range(N_TYPES):
+            od_price = INSTANCE_TYPES[t].ondemand_price
+            for az in range(N_AZS):
+                pool = self.pools[(t, az)]
+                az_count = self._az_instances(az)
+                pool_full = (total_instances >= MAX_INSTANCES or az_count >= MAX_PER_AZ)
+                spot_price = self.market_sim.get_pool_price(t, az)
+                pool_interrupt = self.market_sim.get_pool_interrupt_prob(t, az)
+
+                # PROVISION ops — block khi pool full hoặc capacity đã dư
+                if pool_full or capacity_saturated:
+                    mask[encode_action(Operation.PROVISION_SPOT, t, az)] = False
+                    mask[encode_action(Operation.PROVISION_ONDEMAND, t, az)] = False
+
+                # RELEASE ops — cần count > 0
+                if pool.spot_count == 0:
+                    mask[encode_action(Operation.RELEASE_SPOT, t, az)] = False
+                if pool.ondemand_count == 0:
+                    mask[encode_action(Operation.RELEASE_ONDEMAND, t, az)] = False
+
+                # CONVERT_TO_ONDEMAND — cần có spot ở pool
+                if pool.spot_count == 0:
+                    mask[encode_action(Operation.CONVERT_TO_ONDEMAND, t, az)] = False
+
+                # CONVERT_TO_SPOT — cần có OD + spot rẻ hơn OD
+                if pool.ondemand_count == 0 or spot_price >= od_price:
+                    mask[encode_action(Operation.CONVERT_TO_SPOT, t, az)] = False
+
+                # REBALANCE_SPOT — target pool phải còn slot
+                if pool_full:
+                    mask[encode_action(Operation.REBALANCE_SPOT, t, az)] = False
+
+                # RESERVE_CAPACITY — cần justification (global OR pool-local high risk)
+                # Khác PROVISION_ONDEMAND: bypass capacity_saturated guard vì đây là
+                # proactive backup, không phải scale-up
+                reserve_valid = (
+                    not pool_full
+                    and (reserve_justified_globally or pool_interrupt >= 0.5)
+                )
+                if not reserve_valid:
+                    mask[encode_action(Operation.RESERVE_CAPACITY, t, az)] = False
+
+        # HOLD always valid
+        mask[HOLD_ACTION] = True
+        return mask
 
     def render(self):
         if self.render_mode == "human":

@@ -43,7 +43,13 @@ data/processed/*.parquet
 
 # Model checkpoints
 results/*/models/*.pth
-!results/*/models/best_model.pth  # Keep best models
+!results/*/models/best_model.pth
+results/kaggle/*.pth
+results/kaggle/eval*/
+results/kaggle/eval/
+
+# Kaggle pack
+spot_rl_kaggle.zip
 
 # Logs
 results/*/logs/

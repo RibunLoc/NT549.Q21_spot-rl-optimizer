@@ -222,6 +222,108 @@ class BranchingQNetwork(nn.Module):
         return op, t, az
 
 
+class FactoredDuelingQNetwork(nn.Module):
+    """
+    Factored Dueling Q-Network for action_schema v2.
+
+    Action space is factored: action = (op, pool) where pool = type × az.
+    Instead of N_ACTIONS outputs (121), use:
+      - Shared trunk (state → hidden)
+      - Value head: V(s)
+      - Op advantage head: A_op(s, op) [n_ops]
+      - Pool advantage head: A_pool(s, pool) [n_pools]
+      - HOLD advantage head: A_hold(s) [1]
+
+    Q(s, a=(op, pool)) = V(s) + A_op(s, op) + A_pool(s, pool) - mean(A_op) - mean(A_pool)
+    Q(s, HOLD)         = V(s) + A_hold(s) - mean_over_all
+
+    For compatibility with flat DQN training, forward() returns flat [batch, N_ACTIONS]
+    so the rest of the training pipeline (PER, Double DQN, etc.) works unchanged.
+
+    Benefits vs flat DuelingQNetwork:
+    - Output params: (n_ops + n_pools + 2) vs n_ops * n_pools + 1 → ~6× fewer
+      With n_ops=8, n_pools=15, flat=121 params, factored=25 params
+    - Better sample efficiency: share learning across pools with same op,
+      and across ops at same pool
+    - Extensible: adding ops/pools only grows heads linearly
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        n_ops: int = 8,        # pool-targeted ops (excl. HOLD)
+        n_pools: int = 15,     # types × azs
+        hidden_dim: int = 512,
+    ):
+        super().__init__()
+        self.state_dim = state_dim
+        self.n_ops = n_ops
+        self.n_pools = n_pools
+        self.n_actions = n_ops * n_pools + 1  # +1 for HOLD
+
+        # Shared trunk (deeper than flat net since heads are thinner)
+        self.trunk = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.ReLU(),
+        )
+        feat_dim = hidden_dim // 4
+
+        # Value stream — scalar V(s)
+        self.value_head = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim // 2),
+            nn.ReLU(),
+            nn.Linear(feat_dim // 2, 1),
+        )
+
+        # Advantage heads
+        self.op_adv = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim // 2),
+            nn.ReLU(),
+            nn.Linear(feat_dim // 2, n_ops),
+        )
+        self.pool_adv = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim // 2),
+            nn.ReLU(),
+            nn.Linear(feat_dim // 2, n_pools),
+        )
+        self.hold_adv = nn.Sequential(
+            nn.Linear(feat_dim, feat_dim // 2),
+            nn.ReLU(),
+            nn.Linear(feat_dim // 2, 1),
+        )
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        """Return flat Q-values [batch, n_actions] where HOLD is last index."""
+        h = self.trunk(state)
+        v = self.value_head(h)                         # [B, 1]
+        a_op = self.op_adv(h)                          # [B, n_ops]
+        a_pool = self.pool_adv(h)                      # [B, n_pools]
+        a_hold = self.hold_adv(h)                      # [B, 1]
+
+        # Mean-center each advantage stream independently
+        a_op = a_op - a_op.mean(dim=1, keepdim=True)
+        a_pool = a_pool - a_pool.mean(dim=1, keepdim=True)
+
+        # Broadcast: pool_ops [B, n_ops, n_pools] = A_op[:, :, None] + A_pool[:, None, :]
+        batch = state.shape[0]
+        pool_ops = a_op.unsqueeze(2) + a_pool.unsqueeze(1)        # [B, n_ops, n_pools]
+        pool_ops = pool_ops.view(batch, self.n_ops * self.n_pools)  # [B, 120]
+
+        # Q(s, pool_action) = V(s) + A_op + A_pool (mean-centered)
+        q_pool = v + pool_ops                                      # [B, 120]
+
+        # HOLD: Q = V + A_hold (no factorization)
+        q_hold = v + a_hold                                        # [B, 1]
+
+        # Concatenate: [pool_actions | HOLD]
+        q = torch.cat([q_pool, q_hold], dim=1)                     # [B, 121]
+        return q
+
+
 class DuelingQNetwork(nn.Module):
     """
     Dueling Q-network architecture.
@@ -237,28 +339,30 @@ class DuelingQNetwork(nn.Module):
         self,
         state_dim: int,
         action_dim: int,
-        hidden_dim: int = 128,
+        hidden_dim: int = 512,
     ):
         super(DuelingQNetwork, self).__init__()
 
-        # Shared feature extractor
+        # Shared feature extractor: 2 layers (state → hidden → hidden//2)
         self.feature = nn.Sequential(
             nn.Linear(state_dim, hidden_dim),
             nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
         )
 
-        # Value stream
+        # Value stream: scalar V(s)
         self.value_stream = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1),
+            nn.Linear(hidden_dim // 4, 1),
         )
 
-        # Advantage stream
+        # Advantage stream: A(s, a) for each action
         self.advantage_stream = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Linear(hidden_dim // 2, hidden_dim // 4),
             nn.ReLU(),
-            nn.Linear(hidden_dim // 2, action_dim),
+            nn.Linear(hidden_dim // 4, action_dim),
         )
 
     def forward(self, state: torch.Tensor) -> torch.Tensor:

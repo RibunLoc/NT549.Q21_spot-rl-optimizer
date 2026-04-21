@@ -13,10 +13,9 @@ Baseline strategies for multi-pool (5 types × 3 AZs) environment.
 import numpy as np
 from typing import Dict, Any
 
-from envs.instance_catalog import (
-    N_TYPES, N_AZS, N_ACTIONS, INSTANCE_TYPES,
-    OP_REQUEST_SPOT, OP_REQUEST_ONDEMAND, OP_DO_NOTHING,
-    encode_action,
+from envs.instance_catalog import N_TYPES, N_AZS, INSTANCE_TYPES
+from envs.action_schema import (
+    Operation, N_ACTIONS, encode_action,
 )
 
 
@@ -54,8 +53,8 @@ class OnDemandAgent(BaselineAgent):
                 t_idx = self._rr_idx % N_TYPES
                 az_idx = (self._rr_idx // N_TYPES) % N_AZS
                 self._rr_idx += 1
-                return encode_action(OP_REQUEST_ONDEMAND, t_idx, az_idx)
-        return encode_action(OP_DO_NOTHING, 0, 0)
+                return encode_action(Operation.PROVISION_ONDEMAND, t_idx, az_idx)
+        return encode_action(Operation.HOLD, 0, 0)
 
 
 class SpotAgent(BaselineAgent):
@@ -81,8 +80,8 @@ class SpotAgent(BaselineAgent):
                 t_idx = self._rr_idx % N_TYPES
                 az_idx = (self._rr_idx // N_TYPES) % N_AZS
                 self._rr_idx += 1
-                return encode_action(OP_REQUEST_SPOT, t_idx, az_idx)
-        return encode_action(OP_DO_NOTHING, 0, 0)
+                return encode_action(Operation.PROVISION_SPOT, t_idx, az_idx)
+        return encode_action(Operation.HOLD, 0, 0)
 
 
 class ThresholdAgent(BaselineAgent):
@@ -98,14 +97,14 @@ class ThresholdAgent(BaselineAgent):
 
     def select_action(self, observation: np.ndarray, info: Dict[str, Any] = None) -> int:
         if info is None:
-            return encode_action(OP_DO_NOTHING, 0, 0)
+            return encode_action(Operation.HOLD, 0, 0)
 
         total = info.get('total_instances', 0)
         pending = info.get('pending_jobs', 0)
         needed = max(self.target_capacity, pending // 2)
 
         if total >= needed:
-            return encode_action(OP_DO_NOTHING, 0, 0)
+            return encode_action(Operation.HOLD, 0, 0)
 
         # Top-1 cheapest combo: observation[0] = price_ratio / 2.0
         # observation[3] = az_id normalized
@@ -116,9 +115,9 @@ class ThresholdAgent(BaselineAgent):
         best_type = int(round(observation[15] * (N_TYPES - 1)))
 
         if top1_price_ratio < self.threshold_ratio:
-            return encode_action(OP_REQUEST_SPOT, best_type, top1_az)
+            return encode_action(Operation.PROVISION_SPOT, best_type, top1_az)
         else:
-            return encode_action(OP_REQUEST_ONDEMAND, best_type, top1_az)
+            return encode_action(Operation.PROVISION_ONDEMAND, best_type, top1_az)
 
 
 class CheapestAZAgent(BaselineAgent):
@@ -133,20 +132,20 @@ class CheapestAZAgent(BaselineAgent):
 
     def select_action(self, observation: np.ndarray, info: Dict[str, Any] = None) -> int:
         if info is None:
-            return encode_action(OP_DO_NOTHING, 0, 0)
+            return encode_action(Operation.HOLD, 0, 0)
 
         total = info.get('total_instances', 0)
         pending = info.get('pending_jobs', 0)
         needed = max(self.target_capacity, pending // 2)
 
         if total >= needed:
-            return encode_action(OP_DO_NOTHING, 0, 0)
+            return encode_action(Operation.HOLD, 0, 0)
 
         # Cheapest AZ from observation[13]
         cheapest_az = int(round(observation[13] * (N_AZS - 1)))
         best_type = int(round(observation[15] * (N_TYPES - 1)))
 
-        return encode_action(OP_REQUEST_SPOT, best_type, cheapest_az)
+        return encode_action(Operation.PROVISION_SPOT, best_type, cheapest_az)
 
 
 class CheapestTypeAgent(BaselineAgent):
@@ -163,20 +162,20 @@ class CheapestTypeAgent(BaselineAgent):
 
     def select_action(self, observation: np.ndarray, info: Dict[str, Any] = None) -> int:
         if info is None:
-            return encode_action(OP_DO_NOTHING, 0, 0)
+            return encode_action(Operation.HOLD, 0, 0)
 
         total = info.get('total_instances', 0)
         pending = info.get('pending_jobs', 0)
         needed = max(self.target_capacity, pending // 2)
 
         if total >= needed:
-            return encode_action(OP_DO_NOTHING, 0, 0)
+            return encode_action(Operation.HOLD, 0, 0)
 
         best_type = int(round(observation[15] * (N_TYPES - 1)))
         az_idx = self._az_rr % N_AZS
         self._az_rr += 1
 
-        return encode_action(OP_REQUEST_SPOT, best_type, az_idx)
+        return encode_action(Operation.PROVISION_SPOT, best_type, az_idx)
 
 
 class RandomAgent(BaselineAgent):

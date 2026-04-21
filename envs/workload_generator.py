@@ -25,6 +25,9 @@ class Job:
     deadline: Optional[int] = None  # Hạn chót (timestep)
     size: float = 1.0  # Yêu cầu tài nguyên (vd: số vCPU)
     remaining_time: int = -1  # Thời gian còn lại (-1 = chưa bắt đầu)
+    pool: Optional[tuple] = None  # (type_idx, az_idx) pool đang chạy job này
+    cpu_demand: float = 0.2  # 0-1: mức CPU job cần (0.1=nhẹ, 0.9=nặng)
+    ram_demand: float = 1.0  # GB: RAM job cần
 
     def __post_init__(self):
         if self.remaining_time == -1:
@@ -83,6 +86,15 @@ class WorkloadGenerator:
         self.spike_probability = spike_probability
         self.spike_multiplier = spike_multiplier
         self.rng = np.random.default_rng(seed)
+
+        # Job resource profile — mix of light/medium/heavy jobs
+        # Mô phỏng thực tế: 60% light, 30% medium, 10% heavy
+        self._job_profiles = [
+            # (prob, cpu_low, cpu_high, ram_low_gb, ram_high_gb)
+            (0.60, 0.05, 0.25, 0.5,  2.0),   # light: ETL, log processing
+            (0.30, 0.30, 0.65, 2.0,  8.0),   # medium: ML inference, data transform
+            (0.10, 0.70, 0.95, 8.0, 16.0),   # heavy: model training, large joins
+        ]
 
         # Normalize hourly profile so mean = 1.0, then scale by peak_multiplier
         self.hourly_profile = HOURLY_PROFILE / HOURLY_PROFILE.mean()
@@ -163,6 +175,14 @@ class WorkloadGenerator:
 
         deadline = self.current_timestep + duration * 3  # 3x buffer
 
+        # Sample job profile (light/medium/heavy)
+        probs = [p[0] for p in self._job_profiles]
+        profile_idx = self.rng.choice(len(self._job_profiles), p=probs)
+        _, cpu_low, cpu_high, ram_low, ram_high = self._job_profiles[profile_idx]
+
+        cpu_demand = float(self.rng.uniform(cpu_low, cpu_high))
+        ram_demand = float(self.rng.uniform(ram_low, ram_high))
+
         job = Job(
             job_id=self.job_counter,
             arrival_time=self.current_timestep,
@@ -170,6 +190,8 @@ class WorkloadGenerator:
             priority=1,
             deadline=deadline,
             size=1.0,
+            cpu_demand=cpu_demand,
+            ram_demand=ram_demand,
         )
 
         self.job_counter += 1

@@ -110,6 +110,7 @@ class PrioritizedReplayBuffer:
         self.buffer = []
         self.priorities = np.zeros(capacity, dtype=np.float32)
         self.pos = 0
+        self.rng = np.random.default_rng(np.random.randint(0, 2**31))
 
     def add(
         self,
@@ -131,18 +132,34 @@ class PrioritizedReplayBuffer:
         self.pos = (self.pos + 1) % self.capacity
 
     def sample(self, batch_size: int) -> tuple:
-        """Sample batch with priorities."""
-        # TODO: Implement prioritized sampling
-        # 1. Compute sampling probabilities from priorities
-        # 2. Sample indices based on probabilities
-        # 3. Compute importance sampling weights
-        # 4. Return batch with weights
-        raise NotImplementedError("PrioritizedReplayBuffer not fully implemented")
+        """Sample batch proportional to priority, with IS weights."""
+        n = len(self.buffer)
+        priorities = self.priorities[:n]
+        probs = priorities ** self.alpha
+        probs /= probs.sum()
 
-    def update_priorities(self, indices: list, priorities: np.ndarray):
-        """Update priorities for sampled transitions."""
-        for idx, priority in zip(indices, priorities):
-            self.priorities[idx] = priority ** self.alpha
+        indices = self.rng.choice(n, size=batch_size, replace=False, p=probs)
+
+        beta = min(1.0, self.beta_start + self.frame * (1.0 - self.beta_start) / self.beta_frames)
+        self.frame += 1
+
+        weights = (n * probs[indices]) ** (-beta)
+        weights /= weights.max()
+
+        batch = [self.buffer[i] for i in indices]
+        states      = np.array([e[0] for e in batch], dtype=np.float32)
+        actions     = np.array([e[1] for e in batch], dtype=np.int64)
+        rewards     = np.array([e[2] for e in batch], dtype=np.float32)
+        next_states = np.array([e[3] for e in batch], dtype=np.float32)
+        dones       = np.array([e[4] for e in batch], dtype=np.float32)
+
+        return states, actions, rewards, next_states, dones, indices, weights.astype(np.float32)
+
+    def update_priorities(self, indices, td_errors: np.ndarray):
+        """Update priorities based on TD errors."""
+        priorities = np.abs(td_errors) + 1e-6   # epsilon để tránh priority = 0
+        for idx, p in zip(indices, priorities):
+            self.priorities[idx] = p ** self.alpha
 
     def __len__(self) -> int:
         return len(self.buffer)

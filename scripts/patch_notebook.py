@@ -1,75 +1,185 @@
 import json
 
-with open('notebooks/dqn_spot_demo.ipynb', encoding='utf-8') as f:
-    nb = json.load(f)
+nb = json.load(open('notebooks/kaggle_train.ipynb', encoding='utf-8'))
 
-new_source = '''from tqdm.notebook import tqdm
+def make_cell(src):
+    return {"cell_type": "code", "execution_count": None, "metadata": {}, "outputs": [], "source": src}
 
-def train_dqn(env, agent, num_episodes=1500):
-    rewards_history = []
-    loss_history    = []
-    epsilon_history = []
-    cost_history    = []
-    sla_history     = []
-    best_avg_reward = -float("inf")
+resume_src = (
+    "# Step 5c: (OPTIONAL) Resume tu checkpoint\n"
+    "# Doi RESUME_CHECKPOINT thanh path .pth trong Kaggle input de train tiep\n"
+    "# Vi du: '/kaggle/input/spot-rl-models/best_mixed_v3.pth'\n"
+    "RESUME_CHECKPOINT = None\n"
+    "SAVE_DIR = '/kaggle/working/models'\n"
+    "import os; os.makedirs(SAVE_DIR, exist_ok=True)\n"
+    "\n"
+    "if RESUME_CHECKPOINT:\n"
+    "    agent.load(RESUME_CHECKPOINT)\n"
+    "    print(f'Resumed: {RESUME_CHECKPOINT}')\n"
+    "    print(f'  epsilon={agent.epsilon:.4f}  steps={agent.steps_done:,}')\n"
+    "else:\n"
+    "    print('Fresh training')\n"
+)
 
-    pbar = tqdm(range(num_episodes), desc="Training", unit="ep")
+training_src = (
+    "# Step 6: Training -- generalist agent + prioritized scenario sampling + MLflow\n"
+    "import time, pickle, os, mlflow\n"
+    "import numpy as np\n"
+    "from collections import defaultdict\n"
+    "\n"
+    "if 'MLFLOW_URI' not in dir():\n"
+    "    MLFLOW_URI = None\n"
+    "\n"
+    "NUM_EPISODES = 5000\n"
+    "PATIENCE     = 600\n"
+    "MIN_EPISODES = 2000\n"
+    "PRINT_EVERY  = 100\n"
+    "LOG_EVERY    = 10\n"
+    "os.makedirs(SAVE_DIR, exist_ok=True)\n"
+    "\n"
+    "def model_score(costs, slas, window=200):\n"
+    "    if len(costs) < window:\n"
+    "        return -float('inf')\n"
+    "    recent_cost = np.mean(costs[-window:])\n"
+    "    recent_sla  = np.mean(slas[-window:])\n"
+    "    if recent_sla < 0.95:\n"
+    "        return -1e6 + recent_sla * 1e5\n"
+    "    return -recent_cost\n"
+    "\n"
+    "rewards_history, loss_history = [], []\n"
+    "cost_history, sla_history, eps_history = [], [], []\n"
+    "scenario_history = []\n"
+    "per_scn_cost = defaultdict(list)\n"
+    "per_scn_sla  = defaultdict(list)\n"
+    "\n"
+    "best_score = -float('inf')\n"
+    "best_cost = best_sla = best_reward = None\n"
+    "no_improve_count = 0\n"
+    "start_time = time.time()\n"
+    "\n"
+    "run_name = f'resume-ep{agent.steps_done//168}' if RESUME_CHECKPOINT else 'generalist-prio'\n"
+    "run_ctx = mlflow.start_run(run_name=run_name) if MLFLOW_URI else None\n"
+    "if run_ctx:\n"
+    "    mlflow.log_params({\n"
+    "        **{k: v for k, v in agent_cfg.items() if not isinstance(v, (list, dict))},\n"
+    "        'num_episodes': NUM_EPISODES,\n"
+    "        'scenarios': ','.join(SCENARIOS.keys()),\n"
+    "        'network_params': sum(p.numel() for p in agent.q_network.parameters()),\n"
+    "        'prioritized_scenario_sampling': True,\n"
+    "        'resumed_from': RESUME_CHECKPOINT or 'scratch',\n"
+    "        'resume_epsilon': agent.epsilon,\n"
+    "        'resume_steps': agent.steps_done,\n"
+    "    })\n"
+    "\n"
+    "try:\n"
+    "    for episode in range(NUM_EPISODES):\n"
+    "        obs, info = env.reset()\n"
+    "        scn = info['scenario']\n"
+    "        ep_reward, ep_losses = 0.0, []\n"
+    "\n"
+    "        for step in range(168):\n"
+    "            mask = env.get_action_mask()\n"
+    "            action = agent.select_action(obs, training=True, action_mask=mask)\n"
+    "            next_obs, reward, term, trunc, info = env.step(action)\n"
+    "            done = term or trunc\n"
+    "            agent.store_transition(obs, action, reward, next_obs, done)\n"
+    "            loss = agent.train_step()\n"
+    "            if loss is not None:\n"
+    "                ep_losses.append(loss)\n"
+    "            ep_reward += reward\n"
+    "            obs = next_obs\n"
+    "            if done:\n"
+    "                break\n"
+    "\n"
+    "        ep_cost = info.get('cost', 0)\n"
+    "        ep_sla  = info.get('sla_compliance', 0)\n"
+    "        ep_loss = np.mean(ep_losses) if ep_losses else 0.0\n"
+    "\n"
+    "        rewards_history.append(ep_reward)\n"
+    "        loss_history.append(ep_loss)\n"
+    "        eps_history.append(agent.epsilon)\n"
+    "        cost_history.append(ep_cost)\n"
+    "        sla_history.append(ep_sla)\n"
+    "        scenario_history.append(scn)\n"
+    "        per_scn_cost[scn].append(ep_cost)\n"
+    "        per_scn_sla[scn].append(ep_sla)\n"
+    "\n"
+    "        if ep_loss > 0:\n"
+    "            env.update_scenario_loss(scn, ep_loss)\n"
+    "\n"
+    "        if episode >= 200:\n"
+    "            score = model_score(cost_history, sla_history, window=200)\n"
+    "            if score > best_score + 0.5:\n"
+    "                best_score  = score\n"
+    "                best_cost   = np.mean(cost_history[-200:])\n"
+    "                best_sla    = np.mean(sla_history[-200:])\n"
+    "                best_reward = np.mean(rewards_history[-200:])\n"
+    "                no_improve_count = 0\n"
+    "                agent.save(f'{SAVE_DIR}/best_mixed.pth')\n"
+    "                if run_ctx:\n"
+    "                    mlflow.log_metrics({'best_cost': best_cost, 'best_sla': best_sla,\n"
+    "                                        'best_reward': best_reward}, step=episode)\n"
+    "            elif episode >= MIN_EPISODES:\n"
+    "                no_improve_count += 1\n"
+    "\n"
+    "        if run_ctx and (episode + 1) % LOG_EVERY == 0:\n"
+    "            metrics = {\n"
+    "                'reward':  float(np.mean(rewards_history[-LOG_EVERY:])),\n"
+    "                'cost':    float(np.mean(cost_history[-LOG_EVERY:])),\n"
+    "                'sla':     float(np.mean(sla_history[-LOG_EVERY:])),\n"
+    "                'loss':    float(np.mean(loss_history[-LOG_EVERY:])),\n"
+    "                'epsilon': float(agent.epsilon),\n"
+    "            }\n"
+    "            for n in ['stable', 'volatile', 'spike', 'az_divergence']:\n"
+    "                if per_scn_cost[n]:\n"
+    "                    metrics[f'cost_{n}'] = float(np.mean(per_scn_cost[n][-20:]))\n"
+    "                    metrics[f'sla_{n}']  = float(np.mean(per_scn_sla[n][-20:]))\n"
+    "            for i, n in enumerate(env.scenario_names):\n"
+    "                metrics[f'weight_{n}'] = float(env.weights[i])\n"
+    "            mlflow.log_metrics(metrics, step=episode)\n"
+    "\n"
+    "        if (episode + 1) % PRINT_EVERY == 0:\n"
+    "            avg_r = np.mean(rewards_history[-100:])\n"
+    "            avg_c = np.mean(cost_history[-100:])\n"
+    "            avg_s = np.mean(sla_history[-100:])\n"
+    "            elapsed = (time.time() - start_time) / 60\n"
+    "            bc = f'${best_cost:.1f}' if best_cost is not None else 'n/a'\n"
+    "            bs = f'{best_sla:.1%}' if best_sla is not None else 'n/a'\n"
+    "            scn_sum = ' '.join(\n"
+    "                f'{n[:3]}:${np.mean(per_scn_cost[n][-50:]):.0f}/{np.mean(per_scn_sla[n][-50:]):.0%}'\n"
+    "                for n in ['stable','volatile','spike','az_divergence'] if per_scn_cost[n]\n"
+    "            )\n"
+    "            w_str = ' '.join(f'{n[:3]}:{env.weights[i]:.2f}' for i, n in enumerate(env.scenario_names))\n"
+    "            print(f'Ep {episode+1:4d} | R:{avg_r:+7.1f} Cost:${avg_c:5.1f} SLA:{avg_s:.1%} '\n"
+    "                  f'Eps:{agent.epsilon:.3f} best:{bc}/{bs} | {scn_sum} | w:[{w_str}] | {elapsed:.1f}m')\n"
+    "\n"
+    "        if episode >= MIN_EPISODES and no_improve_count >= PATIENCE:\n"
+    "            print(f'Early stop ep {episode+1}. Best cost=${best_cost:.1f} SLA={best_sla:.1%}')\n"
+    "            break\n"
+    "\n"
+    "finally:\n"
+    "    agent.save(f'{SAVE_DIR}/final_mixed.pth')\n"
+    "    with open(f'{SAVE_DIR}/history_mixed.pkl', 'wb') as f:\n"
+    "        pickle.dump({\n"
+    "            'rewards': rewards_history, 'loss': loss_history,\n"
+    "            'epsilon': eps_history, 'cost': cost_history, 'sla': sla_history,\n"
+    "            'scenario': scenario_history,\n"
+    "            'per_scn_cost': dict(per_scn_cost), 'per_scn_sla': dict(per_scn_sla),\n"
+    "        }, f)\n"
+    "    if run_ctx:\n"
+    "        mlflow.end_run()\n"
+    "        print('MLflow run ended.')\n"
+    "\n"
+    "print(f'Done. Best: cost=${best_cost:.1f} SLA={best_sla:.1%} R={best_reward:+.1f}')\n"
+)
 
-    for episode in pbar:
-        obs, info = env.reset()
-        episode_reward = 0.0
-        episode_losses = []
+nb['cells'].insert(7, make_cell(resume_src))
+nb['cells'].insert(8, make_cell(training_src))
 
-        done = False
-        while not done:
-            action = agent.select_action(obs, training=True)
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-            agent.store_transition(obs, action, reward, next_obs, done)
-            loss = agent.train_step()
-            if loss is not None:
-                episode_losses.append(loss)
-            episode_reward += reward
-            obs = next_obs
+print('Final cell structure:')
+for i, c in enumerate(nb['cells']):
+    s = c['source'] if isinstance(c['source'], str) else ''.join(c['source'])
+    print(f'  [{i}] {s[:65].strip()}')
 
-        rewards_history.append(episode_reward)
-        loss_history.append(np.mean(episode_losses) if episode_losses else 0.0)
-        epsilon_history.append(agent.epsilon)
-        cost_history.append(info.get("cost", 0.0))
-        sla_history.append(info.get("sla_compliance", 1.0))
-
-        avg_r = np.mean(rewards_history[-100:]) if len(rewards_history) >= 100 else np.mean(rewards_history)
-        if len(rewards_history) >= 100 and avg_r > best_avg_reward:
-            best_avg_reward = avg_r
-            agent.save("../results/notebook_demo/best_model.pth")
-
-        if (episode + 1) % 10 == 0:
-            avg_loss = np.mean(loss_history[-10:])
-            avg_sla  = np.mean(sla_history[-10:])
-            pbar.set_postfix({
-                "reward": f"{avg_r:.1f}",
-                "loss":   f"{avg_loss:.3f}",
-                "eps":    f"{agent.epsilon:.3f}",
-                "sla":    f"{avg_sla:.2%}",
-                "cost":   f"${np.mean(cost_history[-10:]):.1f}",
-            })
-
-    pbar.close()
-    print(f"\\nTraining complete!")
-    print(f"Best avg reward (100ep): {best_avg_reward:.2f}")
-    return rewards_history, loss_history, epsilon_history, cost_history, sla_history
-
-
-import os
-os.makedirs("../results/notebook_demo", exist_ok=True)
-
-print(f"Config: spot_capacity={SPOT_CAPACITY}, ondemand_capacity={ONDEMAND_CAPACITY}, SCALE_STEP={env.SCALE_STEP}")
-rewards_hist, loss_hist, eps_hist, cost_hist, sla_hist = train_dqn(env, agent, num_episodes=1500)
-'''
-
-nb['cells'][9]['source'] = [new_source]
-
-with open('notebooks/dqn_spot_demo.ipynb', 'w', encoding='utf-8') as f:
-    json.dump(nb, f, ensure_ascii=False, indent=1)
-
-print('Done! Cell 9 updated with tqdm progress bar.')
+json.dump(nb, open('notebooks/kaggle_train.ipynb', 'w', encoding='utf-8'), indent=1, ensure_ascii=False)
+print('Saved.')
