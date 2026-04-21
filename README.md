@@ -1,67 +1,61 @@
-# Tối ưu chi phí AWS Spot Instance bằng Deep Reinforcement Learning
+# Spot RL Optimization -- AWS Spot Instance Cost Optimization with Deep RL
 
-## Dự án này làm gì?
+Toi uu chi phi AWS Spot Instance bang mot **Generalist DQN Agent** duoc train tren 4 market scenarios khac nhau.
 
-Khi chạy batch workload trên AWS, bạn có thể chọn:
+## Ket qua
 
-| | EC2 On-Demand | EC2 Spot Instance |
-|---|---|---|
-| **Giá** | Cố định (ví dụ $0.096/hr cho m5.large) | Rẻ hơn 60–90%, biến động theo thị trường |
-| **Rủi ro** | Không có | AWS có thể **thu hồi bất kỳ lúc nào** (interruption) |
-| **Phù hợp** | Workload quan trọng, cần ổn định | Batch jobs, có thể tolerate interruption |
+| Agent | Cost (stable) | Cost (volatile) | Cost (spike) | Cost (az_div) | SLA |
+|---|---|---|---|---|---|
+| **DQN (ours)** | **$209** | **$196** | **$204** | **$202** | **~98.9%** |
+| OnDemand | $575 | $575 | $575 | $575 | 96.4% |
+| Spot (pure) | $148 | $129 | $129 | $139 | 85-92% |
+| Threshold | $156 | $147 | $153 | $154 | 90-91% |
+| Random | $394 | $408 | $399 | $391 | 83-84% |
 
-**Vấn đề:** Dùng toàn On-Demand thì đắt. Dùng toàn Spot thì hay bị gián đoạn. Thực tế có **5 loại instance** và **3 Availability Zone** — tức là 15 pools khác nhau, mỗi pool có giá và xác suất interruption riêng.
-
-**Giải pháp:** Train một **DQN agent** để tự động quyết định:
-- Loại instance nào nên dùng (m5.large, c5.xlarge, r5.large, m5.xlarge, c5.2xlarge)
-- AZ nào có giá rẻ nhất và ít interruption nhất
-- Khi nào thêm/bớt instance, khi nào migrate
-- Cân bằng giữa **giảm chi phí** và **đảm bảo SLA ≥ 95%**
+**DQN tiet kiem ~65% chi phi so voi OnDemand trong khi van dam bao SLA >= 95%.**
 
 ---
 
-## Bài toán RL (MDP Formulation)
+## Bai toan RL (MDP Formulation)
 
-### State — 33 features (normalized [0, 1])
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  TOP-3 CHEAPEST POOLS (12)   │  MULTI-AZ AGG (6)  │  INFRA (6)             │
-│  ────────────────────        │  ──────────────     │  ──────                │
-│  Mỗi pool: price_ratio,      │  AZ price spread    │  Total spot / OD       │
-│  interrupt_prob,             │  Cheapest AZ id     │  Total vCPU            │
-│  vCPU/$, az_id               │  AZ concentration   │                        │
-│                              │  Best type rank     │                        │
-│                              │  Worst interr rank  │                        │
-│                              │  Best vCPU/$        │                        │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  WORKLOAD (4)                │  TIME (3)           │  CURRENT STATE (5)     │
-│  ────────────                │  ──────             │  ──────────────        │
-│  Pending jobs                │  Hour of day        │  Avg spot price        │
-│  Running jobs                │  Day of week        │  Avg interrupt prob    │
-│  Workload forecast           │  Episode progress   │  Spot ratio            │
-│  Avg queue wait              │                     │  Cost rate             │
-│                              │                     │  SLA health (10-step)  │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### Action — 105 discrete actions
+### State -- 72 features (normalized [0, 1])
 
 ```
-Action = op × type × az  (7 ops × 5 types × 3 AZs = 105)
++------------------------------------------------------------------+
+|  TOP-3 CHEAPEST POOLS (12)  |  POOL STATS (45)                  |
+|  price_ratio, interrupt,    |  Moi pool trong 15 pools:          |
+|  vcpu_per_dollar, az_id     |  spot_price, od_price,            |
+|                             |  interrupt_rate, vcpu_per_dollar  |
++------------------------------------------------------------------+
+|  INFRA (3)                  |  WORKLOAD (4)                     |
+|  num_spot, num_od,          |  pending_jobs, running_jobs,      |
+|  total_vcpu                 |  forecast_1h, queue_wait          |
++------------------------------------------------------------------+
+|  TIME (3)                   |  CURRENT (5)                      |
+|  hour_of_day, day_of_week,  |  avg_spot_price, avg_interrupt,   |
+|  episode_progress           |  spot_ratio, cost_rate, sla_health|
++------------------------------------------------------------------+
 ```
 
-| # | Operation | Ý nghĩa |
-|---|-----------|---------|
-| 0 | `REQUEST_SPOT` | Thêm 1 spot instance vào pool (type, az) |
-| 1 | `REQUEST_ONDEMAND` | Thêm 1 on-demand instance vào pool (type, az) |
-| 2 | `TERMINATE_SPOT` | Bỏ 1 spot instance khỏi pool |
-| 3 | `TERMINATE_ONDEMAND` | Bỏ 1 on-demand instance khỏi pool |
-| 4 | `MIGRATE_TO_ONDEMAND` | Chuyển spot → OD trong pool (tránh interrupt) |
-| 5 | `MIGRATE_TO_SPOT` | Chuyển OD → spot trong pool (tiết kiệm) |
-| 6 | `DO_NOTHING` | Giữ nguyên trạng thái |
+### Action -- 121 discrete actions
 
-**Instance types:**
+```
+Action = op x pool + HOLD   (8 ops x 15 pools + 1 HOLD = 121)
+```
+
+| # | Operation | Mo ta |
+|---|-----------|-------|
+| 0 | PROVISION_SPOT | Them 1 spot instance vao pool (type, az) |
+| 1 | PROVISION_ONDEMAND | Them 1 on-demand instance vao pool |
+| 2 | RELEASE_SPOT | Bo 1 spot instance khoi pool |
+| 3 | RELEASE_ONDEMAND | Bo 1 on-demand instance khoi pool |
+| 4 | CONVERT_TO_ONDEMAND | Chuyen spot -> OD (tranh interrupt) |
+| 5 | CONVERT_TO_SPOT | Chuyen OD -> spot (tiet kiem) |
+| 6 | REBALANCE_SPOT | Rebalance spot across AZs |
+| 7 | RESERVE_CAPACITY | Reserve capacity cho workload spike |
+| 120 | HOLD | Giu nguyen trang thai |
+
+**15 pools = 5 instance types x 3 Availability Zones:**
 
 | Type | vCPU | OD Price ($/hr) |
 |------|------|-----------------|
@@ -71,123 +65,146 @@ Action = op × type × az  (7 ops × 5 types × 3 AZs = 105)
 | m5.xlarge | 4 | $0.192 |
 | c5.2xlarge | 8 | $0.340 |
 
-**Availability Zones:** ap-southeast-1a, ap-southeast-1b, ap-southeast-1c
+AZs: ap-southeast-1a, ap-southeast-1b, ap-southeast-1c
 
-### Reward — Savings-based
-
-```
-R = savings − sla_penalty − interrupt_penalty − migration_penalty − concentration_penalty − pending_penalty
-
-  savings              = Σ (OD_price × instances) − Σ (spot_price × instances)   ← khuyến khích dùng Spot
-  sla_penalty          = failed_jobs × 10.0                                       ← phạt nặng job fail
-  interrupt_penalty    = interruptions × 0.5                                      ← bị AWS thu hồi
-  migration_penalty    = migrations × 1.0                                         ← migrate tốn overhead
-  concentration_penalty = nếu >80% instances trong 1 AZ                          ← khuyến khích đa AZ
-  pending_penalty      = f(queue_length / capacity)                               ← queue dài = không đủ tài nguyên
-```
-
-Clipped vào `[-10, +10]` mỗi step để ổn định training.
-
----
-
-## Kiến trúc hệ thống
+### Reward -- Savings-based
 
 ```
-┌────────────────────────────────────────────────────────────────┐
-│                   DQN Agent (PyTorch)                          │
-│                                                                │
-│   Q-Network ──────► action ◄────── ε-greedy exploration       │
-│   (MLP: 33 → 512 → 256 → 128 → 105)                          │
-│                                                                │
-│   Target Network     Replay Buffer (200K transitions)          │
-│   (sync mỗi 500 steps)   Huber Loss + grad clip               │
-└─────────────────────────┬──────────────────────────────────────┘
-                          │ (op, type, az) decoded from action index
-                          ▼
-┌────────────────────────────────────────────────────────────────┐
-│           SpotOrchestratorEnv (Gymnasium, 33-dim, 105 actions) │
-│                                                                │
-│   MultiPoolMarketSimulator ── 5 types × 3 AZs price replay    │
-│   WorkloadGenerator ───────── Poisson arrival, daily profile  │
-│   PoolState tracking ──────── spot/OD count per (type, az)    │
-└─────────────────────────┬──────────────────────────────────────┘
-                          │
-                          ▼
-┌────────────────────────────────────────────────────────────────┐
-│                 Dữ liệu Spot Price (Synthetic)                  │
-│                                                                │
-│   4 scenarios: stable, volatile, spike, az_divergence          │
-│   5 types × 3 AZs = 15 pools × ~720 timesteps mỗi file        │
-└────────────────────────────────────────────────────────────────┘
+R = savings - sla_penalty - interrupt_penalty - migration_penalty - concentration_penalty
+
+savings            = baseline_ondemand_cost - actual_cost
+sla_penalty        = failed_jobs x 10.0
+interrupt_penalty  = interruptions x 0.5
+migration_penalty  = migrations x 1.0
+concentration_penalty = max(0, az_concentration - 0.8) x 5.0
 ```
 
 ---
 
-## Cấu trúc thư mục
+## Kien truc Agent
+
+### Factored Dueling DQN
+
+```
+State (72-dim)
+      |
+   Trunk (512 -> 256)
+      |
+  +---+---+----------+
+  |       |          |
+op_head  pool_head  hold_head
+(8)      (15)       (1)
+  |       |          |
+  +---+---+----------+
+        |
+  Q(s,a) = op_score[op] + pool_score[pool]   for pool actions
+  Q(s,a) = hold_score                         for HOLD
+        |
+   121 Q-values
+```
+
+**236K parameters** -- nho nhung hieu qua nho cau truc factored.
+
+### Training Setup
+
+| Parameter | Gia tri |
+|-----------|---------|
+| State dim | 72 |
+| Action dim | 121 |
+| Hidden dim | 512 |
+| Learning rate | 3e-4 (Adam) |
+| Gamma | 0.99 |
+| Epsilon | 1.0 -> 0.05 (decay 300K steps) |
+| Batch size | 256 |
+| Replay buffer | 500K (PER) |
+| Target update | 500 steps |
+| Max steps/ep | 168 (1 tuan, hourly) |
+| Episodes | 5,000 |
+
+**Improvements over vanilla DQN:**
+- **Double DQN** -- giam overestimation bias
+- **Dueling Network** -- tach Value vs Advantage stream
+- **Prioritized Experience Replay (PER)** -- uu tien transition kho
+- **Action Masking** -- chi cho phep actions hop le
+- **Prioritized Scenario Sampling** -- sample scenario theo TD-loss
+
+---
+
+## Mixed Training (Generalist)
+
+Thay vi train 4 specialist models rieng biet, train **1 generalist agent** tren `MixedScenarioEnv`:
+
+```python
+env = MixedScenarioEnv(scenario_paths={
+    "stable":        "data/processed/multipool_stable.csv",
+    "volatile":      "data/processed/multipool_volatile.csv",
+    "spike":         "data/processed/multipool_spike.csv",
+    "az_divergence": "data/processed/multipool_az_divergence.csv",
+})
+# Moi episode: sample 1 scenario ngau nhien (co uu tien theo TD-loss)
+```
+
+**Ket qua:** Agent generalize tot tren ca 4 scenarios voi cost chi lech ~$10 giua cac scenarios.
+
+---
+
+## 4 Training Scenarios
+
+| Scenario | Dac diem | Muc tieu agent |
+|----------|----------|----------------|
+| **Stable** | Gia bien dong thap (~+-10%) | Toi da dung Spot |
+| **Volatile** | Gia spike 2-4x, interrupt cao | Biet khi nao rut ve OD |
+| **Spike** | Workload dot bien 4-5x | Scale nhanh, khong de job fail |
+| **AZ Divergence** | Gia lech lon giua AZ | Chon dung AZ re nhat |
+
+---
+
+## Cau truc thu muc
 
 ```
 spot-rl-optimiztion/
-│
-├── agents/
-│   ├── dqn_agent.py            # DQN (ε-greedy, experience replay, target net)
-│   ├── networks.py             # QNetwork, DuelingQNetwork, BranchingQNetwork, LSTMQNetwork
-│   ├── replay_buffer.py        # Experience replay buffer
-│   └── baselines.py            # 6 baselines: OnDemand, Spot, Threshold,
-│                               #   CheapestAZ, CheapestType, Random
-│
-├── envs/
-│   ├── spot_orchestrator_env.py # SpotOrchestratorEnv — multi-pool env chính
-│   ├── instance_catalog.py      # 5 types × 3 AZs, constants, encode/decode action
-│   ├── market_simulator.py      # MultiPoolMarketSimulator (15 pools)
-│   ├── workload_generator.py    # WorkloadGenerator (Poisson, daily profile, spikes)
-│   ├── spot_env.py              # SpotInstanceEnv (single-pool, legacy)
-│   └── cost_calculator.py       # CostCalculator utility
-│
-├── experiments/
-│   ├── train.py                 # Script training: auto-dispatch single/multi_pool
-│   └── configs/
-│       ├── multi_pool_stable.yaml       # Giá ổn định
-│       ├── multi_pool_volatile.yaml     # Giá biến động mạnh
-│       ├── multi_pool_spike.yaml        # Workload đột biến
-│       ├── multi_pool_az_divergence.yaml# Giá lệch mạnh giữa các AZ
-│       ├── dqn_default.yaml             # Single-pool default
-│       ├── stable_price.yaml            # Single-pool stable
-│       ├── volatile_price.yaml          # Single-pool volatile
-│       └── workload_spike.yaml          # Single-pool spike
-│
-├── data/
-│   ├── processed/               # Dữ liệu đã xử lý (.pkl, .csv)
-│   │   ├── multipool_stable.pkl
-│   │   ├── multipool_volatile.pkl
-│   │   ├── multipool_spike.pkl
-│   │   ├── multipool_az_divergence.pkl
-│   │   └── price_features_*.pkl (single-pool)
-│   └── scripts/
-│       ├── generate_synthetic_spot_prices.py
-│       └── preprocess.py
-│
-├── utils/
-│   ├── logger.py               # setup_logger, TensorBoardLogger
-│   ├── metrics.py              # MetricsTracker
-│   ├── mlflow_logger.py        # MLflow integration
-│   └── visualization.py       # Plotting
-│
-├── results/                   # Training outputs (gitignored binaries)
-│   └── models/                # best_model.pth, final_model.pth per experiment
-│
-├── notebooks/
-│   ├── visualize_training.ipynb
-│   └── dqn_spot_demo.ipynb
-│
-├── app.py
-├── dashboard.py
-├── docker-compose.yml
-└── requirements.txt
+|
++-- agents/
+|   +-- dqn_agent.py            # DQN: Double DQN + Dueling + PER + action masking
+|   +-- networks.py             # FactoredDuelingQNetwork, DuelingQNetwork
+|   +-- replay_buffer.py        # ReplayBuffer + PrioritizedReplayBuffer
+|   +-- baselines.py            # 6 baselines: OnDemand, Spot, Threshold,
+|                               #   CheapestAZ, CheapestType, Random
+|
++-- envs/
+|   +-- spot_orchestrator_env.py # SpotOrchestratorEnv -- multi-pool env chinh
+|   +-- mixed_scenario_env.py    # MixedScenarioEnv -- generalist training wrapper
+|   +-- action_schema.py         # N_ACTIONS=121, decode_action, OPERATION_NAMES
+|   +-- instance_catalog.py      # 5 types x 3 AZs, STATE_DIM=72, constants
+|   +-- workload_generator.py    # WorkloadGenerator (Poisson, daily profile)
+|
++-- experiments/
+|   +-- evaluate_kaggle.py       # Evaluate DQN vs 6 baselines tren 4 scenarios
+|
++-- data/
+|   +-- processed/               # 4 x multipool_*.csv (synthetic spot prices)
+|   +-- scripts/
+|       +-- generate_synthetic_spot_prices.py
+|       +-- preprocess.py
+|
++-- notebooks/
+|   +-- kaggle_train.ipynb       # Training notebook cho Kaggle GPU
+|
++-- scripts/
+|   +-- rebuild_notebook_clean.py # Rebuild notebook tu scratch
+|   +-- fix_notebook_encoding.py
+|
++-- results/
+|   +-- kaggle/                  # Model checkpoints (gitignored)
+|       +-- eval/                # Evaluation results: plots + JSON
+|
++-- pack_kaggle.ps1              # Pack zip de upload len Kaggle Dataset
++-- requirements.txt
 ```
 
 ---
 
-## Hướng dẫn sử dụng
+## Huong dan su dung
 
 ### 1. Setup
 
@@ -197,130 +214,100 @@ venv\Scripts\activate          # Windows
 pip install -r requirements.txt
 ```
 
-### 2. Generate dữ liệu
+### 2. Generate data
 
 ```bash
-# Tạo synthetic spot price data cho 4 scenarios
 python data/scripts/generate_synthetic_spot_prices.py
-
-# Preprocess → features (multi-pool)
 python data/scripts/preprocess.py --mode multi_pool
 ```
 
-### 3. Training
+### 3. Train tren Kaggle
 
 ```bash
-cd experiments
+# Pack code + data thanh zip
+.\pack_kaggle.ps1
 
-# Multi-pool (khuyến nghị)
-python train.py \
-    --config configs/multi_pool_stable.yaml \
-    --experiment-name mp_stable
-
-python train.py \
-    --config configs/multi_pool_volatile.yaml \
-    --experiment-name mp_volatile
-
-# Monitor bằng TensorBoard
-tensorboard --logdir ../results/mp_stable/
-
-# Monitor bằng MLflow
-mlflow ui --backend-store-uri ../mlruns/
+# Upload spot_rl_kaggle.zip len Kaggle Datasets
+# Chay notebooks/kaggle_train.ipynb tren Kaggle GPU T4
 ```
 
-### 4. Resume training
+**Kaggle Secrets can them:**
+```
+MLFLOW_USERNAME       -- MLflow basic auth username
+MLFLOW_PASSWORD       -- MLflow basic auth password
+AWS_ACCESS_KEY_ID     -- AWS S3 artifact store
+AWS_SECRET_ACCESS_KEY -- AWS S3 artifact store
+```
+
+### 4. Evaluate
 
 ```bash
-python train.py \
-    --config configs/multi_pool_stable.yaml \
-    --experiment-name mp_stable_resume \
-    --resume ../results/models/mp_stable_best.pth \
-    --resume-episode 1000
+python experiments/evaluate_kaggle.py \
+    --model results/kaggle/best_mixed_v1.pth \
+    --episodes 30 \
+    --output-dir results/kaggle/eval
+```
+
+Output: `comparison_all_scenarios.png`, `savings_heatmap.png`, `dqn_action_dist.png`, `eval_summary.json`
+
+### 5. Resume training tu checkpoint
+
+Trong `notebooks/kaggle_train.ipynb`, cell Step 5c:
+```python
+RESUME_CHECKPOINT = '/kaggle/input/spot-rl-models/best_mixed_v5.pth'
 ```
 
 ---
 
-## Kịch bản thử nghiệm
+## MLflow Tracking
 
-| Scenario | Data | Đặc điểm | Mục tiêu agent |
-|----------|------|----------|----------------|
-| **Stable** | `multipool_stable.pkl` | Giá biến động thấp (~±10%) | Tối đa dùng Spot, tiết kiệm nhiều nhất |
-| **Volatile** | `multipool_volatile.pkl` | Giá spike 2–4x, interrupt cao | Biết khi nào rút về On-Demand |
-| **Spike** | `multipool_spike.pkl` | Workload đột biến 4–5x | Scale nhanh, không để job fail |
-| **AZ Divergence** | `multipool_az_divergence.pkl` | Giá lệch lớn giữa AZ | Học chọn đúng AZ rẻ nhất |
+- **Tracking server:** mlflow.holoc.id.vn
+- **Experiment:** spot-rl-generalist
+- **Model Registry:** Spot-RL-Agent
 
----
-
-## So sánh với Baselines
-
-| Strategy | Mô tả | Chi phí (stable) | SLA | Nhận xét |
-|----------|--------|------------------|-----|----------|
-| **OnDemand** | Luôn dùng OD, round-robin type/AZ | Cao nhất (~$422/168 steps) | ~100% | Không rủi ro, tốn tiền |
-| **Spot** | Luôn dùng Spot, round-robin | Thấp (~$100) | ~96% | Rẻ nhưng rủi ro interrupt |
-| **Threshold** | Spot khi price_ratio < 0.5 | Thấp (~$96) | ~98% | Đơn giản, hiệu quả |
-| **CheapestAZ** | Spot tại AZ rẻ nhất | Thấp (~$110) | ~98% | Khai thác thông tin AZ |
-| **CheapestType** | Spot với type rẻ nhất, đổi AZ | Thấp (~$94) | ~96% | Tập trung 1 type |
-| **Random** | Ngẫu nhiên | ~$194 | ~98% | Sanity check |
-| **DQN Agent** | Học từ data | **Thấp + ổn định** | **≥95%** | Cân bằng tốt nhất |
-
----
-
-## Hyperparameters (multi-pool)
-
-| Parameter | Giá trị | Ý nghĩa |
-|-----------|---------|---------|
-| State dim | 33 | 33 features normalized [0,1] |
-| Action dim | 105 | 7 ops × 5 types × 3 AZs |
-| Learning rate | 0.0003 | Adam optimizer |
-| Gamma (γ) | 0.99 | Discount factor |
-| Epsilon | 1.0 → 0.01 | Exploration decay |
-| Epsilon decay | 80,000 steps | ~25 episodes × 168 steps |
-| Batch size | 128 | Số transitions mỗi update |
-| Replay buffer | 200,000 | Lưu nhiều hơn do action space lớn |
-| Target update | 500 steps | Sync target network |
-| Max steps/ep | 168 | 1 tuần (hourly timestep) |
-| Episodes | 3,000 | Tổng training |
+Metrics duoc log moi 10 episodes:
+- `reward`, `cost`, `sla`, `loss`, `epsilon`
+- `cost_stable`, `cost_volatile`, `cost_spike`, `cost_az_divergence`
+- `sla_stable`, `sla_volatile`, `sla_spike`, `sla_az_divergence`
+- `weight_<scenario>` -- prioritized sampling weights
+- System metrics: CPU, RAM, GPU utilization (tu dong)
 
 ---
 
 ## Tech Stack
 
 - **Python** 3.12
-- **PyTorch** — DQN, neural networks
-- **Gymnasium** — RL environment
-- **pandas / numpy** — Data processing
-- **MLflow** — Experiment tracking
-- **TensorBoard** — Training monitoring
-- **matplotlib** — Visualization
-- **YAML** — Configuration
+- **PyTorch** -- DQN, neural networks
+- **Gymnasium** -- RL environment
+- **pandas / numpy** -- Data processing
+- **MLflow** -- Experiment tracking + Model Registry
+- **AWS S3** -- Artifact store
+- **Kaggle** -- GPU training (T4)
+- **matplotlib** -- Visualization
 
 ---
 
-## Metrics đánh giá
+## Metrics danh gia
 
-| Metric | Mô tả | Mục tiêu |
+| Metric | Mo ta | Muc tieu |
 |--------|--------|----------|
-| **Episode Reward** | Tổng reward mỗi episode | Tối đa |
-| **Total Cost** | Chi phí ($) mỗi episode 168 steps | Tối thiểu |
-| **SLA Compliance** | % jobs hoàn thành không fail | ≥ 95% |
-| **Spot Usage** | % capacity là spot | Cao = tiết kiệm |
-| **Cost Savings** | % tiết kiệm so với toàn On-Demand | Mục tiêu 40–70% |
-| **Interruptions** | Số lần spot bị AWS thu hồi | Tối thiểu |
+| **Episode Reward** | Tong reward moi episode | Toi da |
+| **Total Cost** | Chi phi ($) moi 168 steps | Toi thieu |
+| **SLA Compliance** | % jobs hoan thanh | >= 95% |
+| **Cost Savings** | % tiet kiem vs OnDemand | ~65% |
+| **Spot Usage** | % capacity la spot | Cao = tiet kiem |
 
 ---
 
-## Tham khảo
+## Tham khao
 
 **Papers:**
-- Mnih et al. (2015) — *Human-level control through deep reinforcement learning* (DQN)
-- Kurth-Nelson et al. — Branching Dueling Q-Network (BDQ)
-- SpotOn (NSDI 2020) — On-Demand Spot Instances
-- Tributary (ATC 2018) — Elastic Services trên Spot
+- Mnih et al. (2015) -- *Human-level control through deep reinforcement learning* (DQN)
+- Wang et al. (2016) -- *Dueling Network Architectures for Deep RL*
+- Schaul et al. (2016) -- *Prioritized Experience Replay*
+- SpotOn (NSDI 2020) -- On-Demand Spot Instances
+- Tributary (ATC 2018) -- Elastic Services tren Spot
 
 **AWS:**
 - [EC2 Spot Instances Pricing](https://aws.amazon.com/ec2/spot/pricing/)
 - [Spot Instance Advisor](https://aws.amazon.com/ec2/spot/instance-advisor/)
-
-**Tutorials:**
-- [PyTorch DQN Tutorial](https://pytorch.org/tutorials/intermediate/reinforcement_q_learning.html)
-- [Custom Gymnasium Environments](https://gymnasium.farama.org/tutorials/gymnasium_basics/environment_creation/)
