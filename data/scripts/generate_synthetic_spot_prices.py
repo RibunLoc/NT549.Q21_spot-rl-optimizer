@@ -36,6 +36,75 @@ HOURLY_PROFILE = np.array([
 ])
 
 
+def generate_capacity_signal(
+    instance_types: list,
+    availability_zones: list,
+    num_points: int,
+    dt_minutes: int = 5,
+    az_shock_rate_per_week: float = 2.0,
+    shock_depth_range: tuple = (0.3, 0.6),
+    shock_decay_hours: float = 12.0,
+    baseline: float = 0.80,
+    noise_std: float = 0.05,
+    seed: int = 42,
+) -> dict:
+    """Generate pool capacity depth signal INDEPENDENT from price.
+
+    Models AWS's real spot interruption driver: OD/Reserved capacity pressure
+    per-AZ. When enterprise customers book reserved capacity, all spot pools in
+    that AZ lose depth simultaneously.
+
+    Returns:
+        dict[(instance_type, az)] → np.ndarray[num_points], values ∈ [0, 1]
+        1 = pool full, 0 = sắp cạn → interrupt imminent
+    """
+    rng = np.random.default_rng(seed)
+
+    # Step 1: AZ-wide shock schedule (shared across all types trong AZ)
+    # Duration in points: num_points * dt_minutes / (60*24*7) weeks
+    weeks = num_points * dt_minutes / (60 * 24 * 7)
+    n_shocks_per_az = int(weeks * az_shock_rate_per_week)
+    decay_points = int(shock_decay_hours * 60 / dt_minutes)
+
+    az_shock_overlay = {az: np.zeros(num_points) for az in availability_zones}
+    for az in availability_zones:
+        shock_times = rng.integers(0, num_points, size=n_shocks_per_az)
+        for t0 in shock_times:
+            depth = rng.uniform(*shock_depth_range)
+            for j in range(decay_points):
+                idx = t0 + j
+                if idx >= num_points:
+                    break
+                decay = np.exp(-j / (decay_points / 3.0))
+                az_shock_overlay[az][idx] = max(az_shock_overlay[az][idx], depth * decay)
+
+    # Step 2: Per-(type, AZ) random walk + AZ shock + peak-hour effect
+    capacity = {}
+    for itype in instance_types:
+        for az in availability_zones:
+            # OU random walk around baseline
+            walk = np.zeros(num_points)
+            walk[0] = baseline
+            theta = 0.05  # mean-reversion speed
+            for i in range(1, num_points):
+                pull = theta * (baseline - walk[i-1])
+                shock = rng.normal(0, noise_std)
+                walk[i] = walk[i-1] + pull + shock
+
+            # Peak-hour effect: 9-17h drop 0.05
+            peak_boost = np.zeros(num_points)
+            for i in range(num_points):
+                hour = (i * dt_minutes // 60) % 24
+                if 9 <= hour <= 17:
+                    peak_boost[i] = -0.05
+
+            depth = walk + peak_boost - az_shock_overlay[az]
+            depth = np.clip(depth, 0.0, 1.0)
+            capacity[(itype, az)] = depth
+
+    return capacity
+
+
 def generate_spot_prices(
     instance_type: str,
     region: str,
@@ -371,6 +440,42 @@ def main():
             all_data.append(df)
 
         combined = pd.concat(all_data, ignore_index=True).sort_values('timestamp')
+
+        # Per-scenario capacity signal params
+        _cap_params = {
+            'stable':        {'az_shock_rate_per_week': 1.0, 'shock_depth_range': (0.2, 0.4)},
+            'volatile':      {'az_shock_rate_per_week': 3.0, 'shock_depth_range': (0.3, 0.6)},
+            'spike':         {'az_shock_rate_per_week': 5.0, 'shock_depth_range': (0.4, 0.7)},
+            'az_divergence': {'az_shock_rate_per_week': 3.0, 'shock_depth_range': (0.3, 0.6)},
+        }.get(scenario_name, {'az_shock_rate_per_week': 2.0, 'shock_depth_range': (0.3, 0.5)})
+
+        # Generate capacity signal (same time grid as prices)
+        num_points = args.days * 24 * 12  # 5-min resolution
+        capacity = generate_capacity_signal(
+            instance_types=instance_types,
+            availability_zones=azs,
+            num_points=num_points,
+            dt_minutes=5,
+            seed=seed + 777,
+            **_cap_params,
+        )
+
+        # Merge capacity column into combined by (timestamp, type, AZ) position
+        # Simpler: both arrays share same ordering (by type → az → time), append column
+        combined = combined.reset_index(drop=True)
+        cap_col = np.zeros(len(combined))
+        # Build lookup: for each row, find capacity[(type, az)][time_index]
+        # Rows are sorted by timestamp asc, so time_index per (type, az) = cumulative count
+        cap_counters = {}
+        for i in range(len(combined)):
+            key = (combined.iloc[i]['instance_type'], combined.iloc[i]['availability_zone'])
+            idx = cap_counters.get(key, 0)
+            if idx < num_points:
+                cap_col[i] = capacity[key][idx]
+            cap_counters[key] = idx + 1
+        combined['capacity_depth'] = cap_col
+        logger.info(f"  Capacity signal: mean={cap_col.mean():.3f} "
+                    f"min={cap_col.min():.3f} p5={np.percentile(cap_col, 5):.3f}")
 
         tag = scenario_name if scenario_name in SCENARIOS else args.tag
         output_file = output_dir / f"spot_prices_{args.region}_{tag}.csv"

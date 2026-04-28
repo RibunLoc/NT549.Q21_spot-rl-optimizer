@@ -1,0 +1,130 @@
+{
+  "stable": {
+    "DQN": {
+      "avg_cost": 209.3219429214925,
+      "std_cost": 25.071213045174996,
+      "avg_sla": 0.988584877054177,
+      "avg_chatter_rate": 0.8599052609853866,
+      "avg_migrations": 66.4,
+      "avg_hold_pct": 0.07392857142857143,
+      "savings_pct": 63.598875623755305
+    },
+    "OnDemand": {
+      "avg_cost": 575.042520000002,
+      "std_cost": 11.893174424417031,
+      "avg_sla": 0.9590568829158557,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.7516666666666666
+    },
+    "Spot": {
+      "avg_cost": 147.91738499014807,
+      "std_cost": 10.836378828132423,
+      "avg_sla": 0.9158776915838228,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.5839285714285715
+    }
+  },
+  "volatile": {
+    "DQN": {
+      "avg_cost": 197.21824533749793,
+      "std_cost": 25.71813963948436,
+      "avg_sla": 0.9837175100014214,
+      "avg_chatter_rate": 0.8500602635799612,
+      "avg_migrations": 62.54,
+      "avg_hold_pct": 0.06940476190476189,
+      "savings_pct": 65.70383491341416
+    },
+    "OnDemand": {
+      "avg_cost": 575.044600000002,
+      "std_cost": 11.948478887289703,
+      "avg_sla": 0.9591217244144147,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.7517857142857142
+    },
+    "Spot": {
+      "avg_cost": 128.66450797389564,
+      "std_cost": 9.457954571951564,
+      "avg_sla": 0.883483834761362,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.4810714285714286
+    }
+  },
+  "spike": {
+    "DQN": {
+      "avg_cost": 206.7295824409909,
+      "std_cost": 28.205321609621848,
+      "avg_sla": 0.9812703332667693,
+      "avg_chatter_rate": 0.8318489738336108,
+      "avg_migrations": 58.0,
+      "avg_hold_pct": 0.07821428571428572,
+      "savings_pct": 64.04981762440858
+    },
+    "OnDemand": {
+      "avg_cost": 575.044600000002,
+      "std_cost": 11.948478887289703,
+      "avg_sla": 0.9591217244144147,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.7517857142857142
+    },
+    "Spot": {
+      "avg_cost": 129.37020485542965,
+      "std_cost": 10.460716554531418,
+      "avg_sla": 0.8524984267167057,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.3926190476190476
+    }
+  },
+  "az_divergence": {
+    "DQN": {
+      "avg_cost": 203.125932849627,
+      "std_cost": 28.297133182860676,
+      "avg_sla": 0.9873870404982376,
+      "avg_chatter_rate": 0.8471975965903854,
+      "avg_migrations": 63.46,
+      "avg_hold_pct": 0.07261904761904762,
+      "savings_pct": 64.67649068443973
+    },
+    "OnDemand": {
+      "avg_cost": 575.044600000002,
+      "std_cost": 11.948478887289703,
+      "avg_sla": 0.9591217244144147,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.7517857142857142
+    },
+    "Spot": {
+      "avg_cost": 139.3623518196626,
+      "std_cost": 10.337704136172981,
+      "avg_sla": 0.9044714588866632,
+      "avg_chatter_rate": 0.0,
+      "avg_migrations": 0.0,
+      "avg_hold_pct": 0.5452380952380952
+    }
+  },
+  "stress": {
+    "interrupt_burst": {
+      "avg_cost": 194.6010638266905,
+      "avg_sla": 0.985361247152514,
+      "avg_chatter": 0.8490394940214943,
+      "avg_migrations": 64.15
+    },
+    "az_divergence": {
+      "avg_cost": 209.16374621276964,
+      "avg_sla": 0.990723655039238,
+      "avg_chatter": 0.8492824847671416,
+      "avg_migrations": 70.05
+    },
+    "workload_burst": {
+      "avg_cost": 423.9220594406177,
+      "avg_sla": 0.9149773457856621,
+      "avg_chatter": 0.7706121409900565,
+      "avg_migrations": 56.15
+    }
+  }
+}

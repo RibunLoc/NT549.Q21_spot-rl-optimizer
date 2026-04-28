@@ -1,0 +1,9 @@
+# Minimal deps for training on RunPod / fresh instances.
+# Torch is pre-installed in RunPod Pytorch image, so excluded here.
+gymnasium==0.29.1
+numpy==1.26.4
+pandas==2.2.0
+matplotlib==3.8.2
+tqdm==4.66.2
+mlflow==2.14.3
+python-dotenv==1.0.1

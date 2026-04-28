@@ -120,15 +120,26 @@ class PrioritizedReplayBuffer:
         next_state: np.ndarray,
         done: bool,
     ):
-        """Add experience with maximum priority."""
-        max_priority = self.priorities.max() if self.buffer else 1.0
+        """Add experience with a moderately high priority.
+
+        Dùng p95 thay vì max() vì max() có thể là outlier cực lớn, làm entry mới
+        dominate sampling vô thời hạn tới khi được sample lại. p95 vẫn đủ cao để
+        new transition được ưu tiên khám phá nhưng không vượt trội outliers.
+        """
+        if self.buffer:
+            filled = self.priorities[:len(self.buffer)]
+            init_priority = float(np.quantile(filled, 0.95))
+            if init_priority <= 0:
+                init_priority = 1.0
+        else:
+            init_priority = 1.0
 
         if len(self.buffer) < self.capacity:
             self.buffer.append((state, action, reward, next_state, done))
         else:
             self.buffer[self.pos] = (state, action, reward, next_state, done)
 
-        self.priorities[self.pos] = max_priority
+        self.priorities[self.pos] = init_priority
         self.pos = (self.pos + 1) % self.capacity
 
     def sample(self, batch_size: int) -> tuple:
@@ -156,10 +167,15 @@ class PrioritizedReplayBuffer:
         return states, actions, rewards, next_states, dones, indices, weights.astype(np.float32)
 
     def update_priorities(self, indices, td_errors: np.ndarray):
-        """Update priorities based on TD errors."""
+        """Update priorities based on TD errors.
+
+        Store RAW |td_error| (pre-alpha). sample() applies ** alpha uniformly
+        to all entries, nên cả add() và update_priorities() đều phải lưu raw
+        priority để sampling consistent.
+        """
         priorities = np.abs(td_errors) + 1e-6   # epsilon để tránh priority = 0
         for idx, p in zip(indices, priorities):
-            self.priorities[idx] = p ** self.alpha
+            self.priorities[idx] = p
 
     def __len__(self) -> int:
         return len(self.buffer)

@@ -32,7 +32,7 @@ foreach ($d in $DIRS) {
     Write-Host "  [+] $d\" -ForegroundColor Green
 }
 
-# --- 2. Data processed (chi .csv) ---
+# --- 2. Data processed (.csv - text format, cross-version pandas compat) ---
 $DATA_DST = "$TMP\data\processed"
 New-Item -ItemType Directory -Path $DATA_DST | Out-Null
 $csvFiles = Get-ChildItem "$ROOT\data\processed" -Filter "multipool_*.csv"
@@ -42,15 +42,30 @@ foreach ($f in $csvFiles) {
     Write-Host "  [+] data/processed/$($f.Name) ($sizeMB MB)" -ForegroundColor Green
 }
 
-# --- 3. Notebook ---
+# --- 3. Notebooks (Kaggle + RunPod) ---
 $NB_DST = "$TMP\notebooks"
 New-Item -ItemType Directory -Path $NB_DST | Out-Null
 Copy-Item "$ROOT\notebooks\kaggle_train.ipynb" "$NB_DST\kaggle_train.ipynb"
 Write-Host "  [+] notebooks/kaggle_train.ipynb" -ForegroundColor Green
+if (Test-Path "$ROOT\notebooks\runpod_train.ipynb") {
+    Copy-Item "$ROOT\notebooks\runpod_train.ipynb" "$NB_DST\runpod_train.ipynb"
+    Write-Host "  [+] notebooks/runpod_train.ipynb" -ForegroundColor Green
+}
 
 # --- 4. Requirements ---
 Copy-Item "$ROOT\requirements.txt" "$TMP\requirements.txt"
 Write-Host "  [+] requirements.txt" -ForegroundColor Green
+
+# --- 4b. RunPod setup files (optional fallback target) ---
+if (Test-Path "$ROOT\requirements-train.txt") {
+    Copy-Item "$ROOT\requirements-train.txt" "$TMP\requirements-train.txt"
+    Write-Host "  [+] requirements-train.txt" -ForegroundColor Green
+}
+if (Test-Path "$ROOT\scripts\runpod_setup.sh") {
+    New-Item -ItemType Directory -Path "$TMP\scripts" -Force | Out-Null
+    Copy-Item "$ROOT\scripts\runpod_setup.sh" "$TMP\scripts\runpod_setup.sh"
+    Write-Host "  [+] scripts/runpod_setup.sh" -ForegroundColor Green
+}
 
 # --- 5. Tao zip bang Python (forward slash, tuong thich Linux/Kaggle) ---
 Write-Host ""

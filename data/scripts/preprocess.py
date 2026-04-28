@@ -85,10 +85,12 @@ def preprocess_spot_prices(
     # Price trend: ratio of current price to 24h MA
     features['price_trend'] = (hourly / features['price_ma_24h']).fillna(1.0)
 
-    # Estimated interruption probability:
-    # Higher when price is above average (demand > supply)
+    # Estimated interruption probability (per-type calibrated):
+    # P = base_rate + max(0, (price/MA_24h - 1) * alpha)
+    # base_rate: natural AWS churn at stable price
+    # max(0,...): price drop → return to base_rate, never negative
     features['est_interruption_prob'] = np.clip(
-        (features['price_trend'] - 1.0) * 0.5, 0.01, 0.30
+        0.02 + np.maximum(0, (features['price_trend'] - 1.0) * 0.5), 0.01, 0.30
     )
 
     # Time features
@@ -147,22 +149,74 @@ def preprocess_multi_pool(
                 continue
 
             sub = sub.set_index('timestamp')
-            hourly = sub['spot_price'].resample('1h').mean().interpolate(method='linear').dropna()
+            # v14: resample to 15-min resolution (4 steps/hour) for finer granularity
+            hourly = sub['spot_price'].resample('15min').mean().interpolate(method='linear').dropna()
 
             feat = pd.DataFrame(index=hourly.index)
             feat['spot_price'] = hourly
             feat['instance_type'] = itype
             feat['availability_zone'] = az
-            feat['price_ma_1h'] = hourly.rolling(window=1, min_periods=1).mean()
-            feat['price_ma_24h'] = hourly.rolling(window=24, min_periods=1).mean()
-            feat['price_volatility_24h'] = hourly.rolling(window=24, min_periods=2).std().fillna(0)
+            # v14: windows tính theo 15-min steps (4 steps/hour)
+            feat['price_ma_1h'] = hourly.rolling(window=4, min_periods=1).mean()
+            feat['price_ma_24h'] = hourly.rolling(window=96, min_periods=1).mean()
+            feat['price_volatility_24h'] = hourly.rolling(window=96, min_periods=2).std().fillna(0)
+            feat['price_cv_24h'] = (feat['price_volatility_24h'] / feat['price_ma_24h'].clip(1e-6)).fillna(0.0)
             feat['price_trend'] = (hourly / feat['price_ma_24h']).fillna(1.0)
-            feat['est_interruption_prob'] = np.clip(
-                (feat['price_trend'] - 1.0) * 0.5, 0.01, 0.30
-            )
             feat['hour_of_day'] = feat.index.hour
             feat['day_of_week'] = feat.index.dayofweek
 
+            _alpha_map = {
+                "m5.large": (0.02, 0.6), "c5.xlarge": (0.02, 0.5),
+                "r5.large": (0.03, 0.5), "m5.xlarge": (0.02, 0.4),
+                "c5.2xlarge": (0.02, 0.3),
+            }
+            _base, _alpha = _alpha_map.get(itype, (0.02, 0.5))
+
+            # NEW: capacity-driven interrupt (decoupled from price)
+            # P = base_rate + (1 - capacity_depth) * 0.35  [MAIN]
+            #   + peak_hour_boost * 0.02                    [weak time]
+            #   + max(0, price_trend-1) * 0.05             [weak legacy price]
+            if 'capacity_depth' in sub.columns:
+                cap_hourly = sub['capacity_depth'].resample('15min').mean().interpolate(method='linear').fillna(0.8)
+                cap_aligned = cap_hourly.reindex(feat.index, method='nearest').fillna(0.8)
+                feat['capacity_depth'] = cap_aligned.values
+                peak_boost = (feat['hour_of_day'].between(9, 17)).astype(float) * 0.02
+                feat['est_interruption_prob'] = np.clip(
+                    _base
+                    + (1.0 - feat['capacity_depth']) * 0.35
+                    + peak_boost
+                    + np.maximum(0, (feat['price_trend'] - 1.0) * 0.05),
+                    0.01, 0.50
+                )
+
+                # SPS score ∈ [0, 1]: pool health (1 = healthy, 0 = danger)
+                # Weights tuned: capacity is dominant, volatility+interrupt are secondary
+                recent_interr = feat['est_interruption_prob'].rolling(window=16, min_periods=1).mean()
+                feat['sps_score'] = np.clip(
+                    feat['capacity_depth']            # main driver ~0.8 baseline
+                    - feat['price_cv_24h'] * 1.0      # volatility penalty (gentler)
+                    - recent_interr * 1.5             # interrupt history penalty (gentler)
+                    + 0.05,                            # baseline boost
+                    0.0, 1.0
+                )
+
+                # Rebalance flag: sps < 0.3 AND capacity < 0.3
+                feat['rebalance_flag'] = (
+                    (feat['sps_score'] < 0.3) & (feat['capacity_depth'] < 0.3)
+                ).astype(float)
+
+                # Termination flag: lookahead 8 steps (= 2h @ 15min/step)
+                # Flag=1 nếu capacity sẽ drop < 0.1 trong 8 steps tới
+                future_cap_min = feat['capacity_depth'].shift(-1).rolling(
+                    window=8, min_periods=1
+                ).min()
+                # rolling(window) applied on shifted gives us min of next 1..8 steps
+                feat['termination_flag'] = (future_cap_min < 0.1).astype(float).fillna(0.0)
+            else:
+                # Fallback: legacy price-only formula
+                feat['est_interruption_prob'] = np.clip(
+                    _base + np.maximum(0, (feat['price_trend'] - 1.0) * _alpha), 0.01, 0.30
+                )
             feat = feat.reset_index().rename(columns={'index': 'timestamp'})
             all_features.append(feat)
 

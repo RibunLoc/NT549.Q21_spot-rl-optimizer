@@ -22,15 +22,29 @@ class InstanceType:
     vcpus: int
     memory_gb: float
     ondemand_price: float  # $/hour in ap-southeast-1
+    # Interruption model: P = base_rate + (1 - capacity_depth) * 0.35 + ...
+    # base_rate: AWS natural churn even at stable price (from Spot Instance Advisor)
+    # alpha:     price-sensitivity coefficient (legacy, weak signal in v14)
+    base_interrupt_rate: float = 0.02
+    interrupt_alpha: float = 0.5
+    # Long-term average spot price as fraction of OD (from Spot Advisor "savings")
+    # Used as STATIC feature: agent knows baseline savings expectation per type
+    long_term_spot_ratio: float = 0.35  # ≈ spot avg is 35% of OD → 65% savings
 
 
 # 5 instance types spanning compute, memory, and general-purpose
+# alpha calibrated by instance family capacity depth (AWS Spot Advisor data):
+#   small general (m5.large):  shallower pool → more sensitive → alpha=0.6
+#   compute (c5.xlarge):       medium pool                     → alpha=0.5
+#   memory (r5.large):         medium pool, higher base churn  → alpha=0.5, base=0.03
+#   large general (m5.xlarge): deeper pool                     → alpha=0.4
+#   large compute (c5.2xlarge):deepest pool, most stable       → alpha=0.3
 INSTANCE_TYPES: List[InstanceType] = [
-    InstanceType("m5.large",    2,   8.0, 0.096),
-    InstanceType("c5.xlarge",   4,   8.0, 0.170),
-    InstanceType("r5.large",    2,  16.0, 0.126),
-    InstanceType("m5.xlarge",   4,  16.0, 0.192),
-    InstanceType("c5.2xlarge",  8,  16.0, 0.340),
+    InstanceType("m5.large",   2,  8.0, 0.096, 0.02, 0.6, 0.36),
+    InstanceType("c5.xlarge",  4,  8.0, 0.170, 0.02, 0.5, 0.36),
+    InstanceType("r5.large",   2, 16.0, 0.126, 0.03, 0.5, 0.35),
+    InstanceType("m5.xlarge",  4, 16.0, 0.192, 0.02, 0.4, 0.35),
+    InstanceType("c5.2xlarge", 8, 16.0, 0.340, 0.02, 0.3, 0.35),
 ]
 
 AVAILABILITY_ZONES: List[str] = [
@@ -45,7 +59,12 @@ N_AZS = len(AVAILABILITY_ZONES)  # 3
 
 # State dimensions (documented per feature group)
 N_TOP_K = 3                 # top-3 cheapest combos
-N_TOP_K_FEATURES = 4        # price, interrupt, vcpu/$, az_id
+# v14: 10 features = 4 original + 2 static + 2 dynamic + 2 event flags
+#   price_ratio, interrupt_prob, vcpu/$, az_id            [dynamic]
+#   base_rate, baseline_savings                            [static]
+#   sps_score, price_cv_24h                                [dynamic]
+#   rebalance_flag, termination_flag                       [event]
+N_TOP_K_FEATURES = 10
 N_MULTI_AZ = 3              # spread, cheapest_az, concentration
 N_MULTI_TYPE = 3            # price_rank, interrupt_rank, vcpu_ratio
 N_INFRA = 3                 # spot, ondemand, capacity

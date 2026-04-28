@@ -1,0 +1,50 @@
+# Dockerfile.train — GPU training image for RunPod
+# Base: PyTorch 2.3 + CUDA 12.1 (matches RunPod Pytorch template)
+# Usage:
+#   docker build -f Dockerfile.train -t <user>/spot-rl-train:latest .
+#   docker push <user>/spot-rl-train:latest
+# On RunPod: pull this image, mount /workspace, run train.sh
+
+FROM pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /workspace/spot-rl
+
+# System deps (minimal)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python deps — install torch-compatible versions
+# torch/numpy/matplotlib already in base image, use --no-deps for conflict packages
+COPY requirements-train.txt .
+RUN pip install --no-cache-dir \
+    gymnasium==0.29.1 \
+    pandas==2.2.0 \
+    tqdm==4.66.2 \
+    python-dotenv==1.0.1 \
+    jupyterlab \
+    opentelemetry-api \
+    opentelemetry-sdk \
+    && pip install --no-cache-dir --no-deps \
+    mlflow==2.14.3
+
+# Copy source code (no data — mount or download at runtime)
+COPY envs/        envs/
+COPY agents/      agents/
+COPY utils/       utils/
+COPY experiments/ experiments/
+COPY notebooks/   notebooks/
+COPY scripts/     scripts/
+
+# Create __init__.py if missing
+RUN for pkg in envs agents utils; do \
+    [ -f $pkg/__init__.py ] || touch $pkg/__init__.py; \
+    done
+
+RUN chmod +x scripts/runpod_entrypoint.sh
+
+EXPOSE 8888
+
+# Default: entrypoint starts Jupyter + smoke test
+# Override with: docker run ... python experiments/train.py
+CMD ["/bin/bash", "scripts/runpod_entrypoint.sh"]

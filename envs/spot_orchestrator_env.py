@@ -23,7 +23,7 @@ from envs.instance_catalog import (
     get_od_price, get_max_od_price,
 )
 from envs.action_schema import (
-    Operation, N_ACTIONS, HOLD_ACTION, OPERATION_NAMES,
+    Operation, N_ACTIONS, N_POOLS, HOLD_ACTION, OPERATION_NAMES,
     decode_action, encode_action,
 )
 from envs.market_simulator import MultiPoolMarketSimulator
@@ -51,7 +51,7 @@ class SpotOrchestratorEnv(gym.Env):
         self,
         data_path: str = None,
         price_data: pd.DataFrame = None,
-        max_steps: int = 168,
+        max_steps: int = 672,   # v14: 1 week @ 15min/step (was 168 @ 1h)
         sla_threshold: float = 0.95,
         workload_config: Dict[str, Any] = None,
         reward_config: Dict[str, Any] = None,
@@ -69,11 +69,7 @@ class SpotOrchestratorEnv(gym.Env):
             self.price_data = price_data
         elif data_path is not None:
             if data_path.endswith('.pkl'):
-                try:
-                    self.price_data = pd.read_pickle(data_path)
-                except (NotImplementedError, Exception):
-                    csv_path = data_path.replace('.pkl', '.csv')
-                    self.price_data = pd.read_csv(csv_path)
+                self.price_data = pd.read_pickle(data_path)
             else:
                 self.price_data = pd.read_csv(data_path)
         else:
@@ -93,21 +89,42 @@ class SpotOrchestratorEnv(gym.Env):
         )
 
         # Workload generator
+        # v14: defaults scaled for 15-min step (÷4 rate, ×4 duration vs hourly)
         wc = workload_config or {}
         self.workload_gen = WorkloadGenerator(
-            base_arrival_rate=wc.get('base_arrival_rate', 5.0),
+            base_arrival_rate=wc.get('base_arrival_rate', 1.25),   # 5/h → 1.25/15min
             peak_multiplier=wc.get('peak_multiplier', 3.0),
-            avg_job_duration=wc.get('avg_job_duration', 3),
+            avg_job_duration=wc.get('avg_job_duration', 12),        # 3h → 12 steps
             seed=seed,
         )
 
-        # Reward config
+        # Reward config — rescale xuống cùng magnitude với savings ($0.1-2/step)
+        # để gradient không bị SLA penalty dominate.
         rc = reward_config or {}
-        self.sla_penalty_coeff = rc.get('sla_penalty', 10.0)
-        self.interrupt_penalty_coeff = rc.get('interrupt_penalty', 0.5)
-        self.migration_penalty_coeff = rc.get('migration_penalty', 1.0)
-        self.concentration_penalty_coeff = rc.get('concentration_penalty', 0.2)
+        # v13-fix: giảm sla 2.0 -> 1.0 để cân bằng với savings (max ~$1.3/step)
+        self.sla_penalty_coeff = rc.get('sla_penalty', 1.0)
+        self.interrupt_penalty_coeff = rc.get('interrupt_penalty', 0.1)
+        self.convert_to_od_penalty_coeff   = rc.get('convert_to_od_penalty',   0.4)
+        self.convert_to_spot_penalty_coeff = rc.get('convert_to_spot_penalty', 0.3)
+        self.rebalance_penalty_coeff       = rc.get('rebalance_penalty',       0.8)
+        if 'migration_penalty' in rc:
+            mp = rc['migration_penalty']
+            self.convert_to_od_penalty_coeff   = rc.get('convert_to_od_penalty',   mp)
+            self.convert_to_spot_penalty_coeff = rc.get('convert_to_spot_penalty', mp * 0.75)
+            self.rebalance_penalty_coeff       = rc.get('rebalance_penalty',       mp * 2.0)
+        self.migration_penalty_coeff = self.rebalance_penalty_coeff
+        self.concentration_penalty_coeff = rc.get('concentration_penalty', 0.05)
         self.concentration_threshold = rc.get('concentration_threshold', 0.8)
+        # v13-fix: penalty cho over-provision (fleet > workload cần)
+        # Mỗi vCPU-instance idle bị phạt theo OD price/h → khuyến khích shrink fleet
+        self.overprovision_penalty_coeff = rc.get('overprovision_penalty', 0.3)
+        # v14-fix: per-step fleet size penalty
+        # Phạt 0.03 mỗi instance mỗi step → fleet 10 inst × 168 steps = 50.4 reward loss/ep
+        # Đủ mạnh để agent học shrink, không quá mạnh để vẫn giữ instance khi cần.
+        self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.03)
+        # Cooldown: số steps mỗi pool bị locked sau PROVISION/CONVERT/REBALANCE
+        # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh
+        self.cooldown_steps = rc.get('cooldown_steps', 2)
 
         # Spaces
         self.observation_space = spaces.Box(
@@ -147,17 +164,15 @@ class SpotOrchestratorEnv(gym.Env):
 
         # Migration/interruption tracking per step
         self.step_migrations = 0
+        self.step_convert_to_od = 0        # CONVERT_TO_ONDEMAND count
+        self.step_convert_to_spot = 0      # CONVERT_TO_SPOT count
+        self.step_rebalance = 0            # REBALANCE_SPOT count
         self.step_interruptions = 0
         self.step_wasted_action = False
         self.step_migrate_to_spot = False   # for migrate-back bonus
 
         # Idle streak: số steps liên tiếp mà pending=0 và running=0
         self.idle_streak = 0
-
-        # Stability tracking: phát hiện request/terminate churn
-        self.prev_instance_count = 0        # instance count bước trước
-        self.instance_change_history = []   # +1=request, -1=terminate, 0=stable
-        self.churn_streak = 0               # số steps liên tiếp flip request↔terminate
 
         # Migrate-back tracking: thưởng khi migrate về spot sau period giá cao
         self.steps_since_migrate_to_od = 0  # đếm steps kể từ lần migrate sang OD
@@ -175,9 +190,15 @@ class SpotOrchestratorEnv(gym.Env):
         self.step_migrate_spot_to_spot = False      # for reward bonus
         self.step_unnecessary_od = False            # for unnecessary OD penalty
         self.step_reserved_capacity = False         # v2: proactive RESERVE_CAPACITY bonus
-        self.baseline_od_cost_per_step = sum(       # full OD cost baseline (per step)
-            t.ondemand_price for t in INSTANCE_TYPES
-        )
+        # Cumulative baseline: tổng OD cost "nếu fleet hiện tại chạy full OD" qua các steps.
+        # Tích lũy bằng step chứ không snapshot lúc reset vì fleet thay đổi theo thời gian.
+        self.cumulative_baseline_od_cost = 0.0
+
+        # Per-pool cooldown: số steps còn lại trước khi pool được phép nhận action mới
+        # Khởi tạo 0 = không locked
+        self.pool_cooldown: Dict[Tuple[int, int], int] = {
+            (t, az): 0 for t in range(N_TYPES) for az in range(N_AZS)
+        }
 
         # Per-pool resource tracking (for state features [42-71])
         self.pool_running_jobs: Dict[Tuple[int, int], int] = {
@@ -213,6 +234,9 @@ class SpotOrchestratorEnv(gym.Env):
         self.step_completed_jobs = 0
         self.step_failed_jobs = 0
         self.step_migrations = 0
+        self.step_convert_to_od = 0
+        self.step_convert_to_spot = 0
+        self.step_rebalance = 0
         self.step_interruptions = 0
 
         # 1. Execute action
@@ -300,6 +324,7 @@ class SpotOrchestratorEnv(gym.Env):
                 pool.spot_count -= 1
                 pool.ondemand_count += 1
                 self.step_migrations += 1
+                self.step_convert_to_od += 1
             else:
                 self.step_wasted_action = True
 
@@ -312,6 +337,7 @@ class SpotOrchestratorEnv(gym.Env):
                 pool.ondemand_count -= 1
                 pool.spot_count += 1
                 self.step_migrations += 1
+                self.step_convert_to_spot += 1
                 self.step_migrate_to_spot = True
             else:
                 self.step_wasted_action = True
@@ -337,6 +363,7 @@ class SpotOrchestratorEnv(gym.Env):
                 self.pools[src_key].spot_count -= 1
                 pool.spot_count += 1
                 self.step_migrations += 1
+                self.step_rebalance += 1
                 self.step_migrate_spot_to_spot = True
 
         elif op == Operation.RESERVE_CAPACITY:
@@ -373,6 +400,12 @@ class SpotOrchestratorEnv(gym.Env):
 
         elif op == Operation.HOLD:
             pass  # no-op
+
+        # Set per-pool cooldown after any effective (non-wasted, non-HOLD) action.
+        # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh khi over-provision.
+        is_release = op in (Operation.RELEASE_SPOT, Operation.RELEASE_ONDEMAND)
+        if op != Operation.HOLD and not self.step_wasted_action and not is_release:
+            self.pool_cooldown[(type_idx, az_idx)] = self.cooldown_steps
 
     # ──────────────────────────────────────────────
     #  Timestep simulation
@@ -510,32 +543,17 @@ class SpotOrchestratorEnv(gym.Env):
             self.step_cost += pool.ondemand_count * od_price
         self.total_cost += self.step_cost
 
-        # 10. Stability tracking — detect request/terminate churn
-        current_count = self._total_instances()
-        delta = current_count - self.prev_instance_count
-        change = 1 if delta > 0 else (-1 if delta < 0 else 0)
-        self.instance_change_history.append(change)
-        if len(self.instance_change_history) > 4:
-            self.instance_change_history.pop(0)
-        # churn = alternating +1/-1 in recent history (e.g. [1,-1,1,-1])
-        if len(self.instance_change_history) >= 3:
-            flips = sum(
-                1 for i in range(1, len(self.instance_change_history))
-                if self.instance_change_history[i] != 0
-                and self.instance_change_history[i] != self.instance_change_history[i-1]
-                and self.instance_change_history[i-1] != 0
-            )
-            self.churn_streak = flips
-        else:
-            self.churn_streak = 0
-        self.prev_instance_count = current_count
-
-        # 11. Migrate-back tracking
+        # 10. Migrate-back tracking
         self.has_od_instances = any(p.ondemand_count > 0 for p in self.pools.values())
         if self.has_od_instances:
             self.steps_since_migrate_to_od += 1
         else:
             self.steps_since_migrate_to_od = 0
+
+        # 11. Tick per-pool cooldown counters down by 1 each step
+        for key in self.pool_cooldown:
+            if self.pool_cooldown[key] > 0:
+                self.pool_cooldown[key] -= 1
 
     # ──────────────────────────────────────────────
     #  Reward
@@ -543,111 +561,94 @@ class SpotOrchestratorEnv(gym.Env):
 
     def _calculate_reward(self) -> float:
         """
-        Clean reward function — 5 terms chính, không trùng lặp mục đích.
+        Savings-based reward.
 
-        Mục tiêu: tiết kiệm cost + SLA >= 95%
+        R = savings
+            - sla_penalty
+            - interrupt_penalty
+            - migration_penalty  (split: convert_to_od / convert_to_spot / rebalance)
+            - concentration_penalty
 
-        R = cost_efficiency     # reward chính: dùng ít tiền hơn baseline OD lý thuyết
-            - sla_penalty       # phạt khi job failed
-            - interrupt_penalty # phạt khi spot bị interrupt
-            - stability_penalty # phạt churn/wasted action/concentration (gộp)
-            + smart_bonus       # thưởng migrate_to_spot + spot_to_spot rebalance
+        baseline_od_cost = "nếu đúng đội hình hiện tại nhưng ALL on-demand".
+        → cùng scale với step_cost (instance × $/h), không pha jobs với instances.
+        → savings > 0 chỉ khi thật sự đang dùng spot hiệu quả.
         """
-        total_instances = self._total_instances()
-        total_cap = max(1, self._total_vcpu())
+        # ═══ 1. SAVINGS (reward chính) — v13-fix ═══
+        # OLD bug: baseline = current_fleet × OD → fleet 5 vs fleet 20 đều savings=0
+        # NEW: baseline = workload-required fleet × avg OD price
+        # → savings reflect "agent có dùng spot thay vì OD cho workload thực tế"
+        # → over-provision không kiếm được thêm savings vì baseline cố định theo workload
+        avg_od = sum(t.ondemand_price for t in INSTANCE_TYPES) / len(INSTANCE_TYPES)
+        # Workload-required vCPUs: pending + running jobs (mỗi job ~1 vCPU slot)
+        required_vcpu = self.pending_jobs + self.running_jobs
+        # Quy đổi sang số instance "tham chiếu" theo m5.large (2 vCPU)
+        required_instances = max(1, required_vcpu / 2.0)
+        baseline_od_cost = required_instances * avg_od
 
-        # ═══ 1. COST EFFICIENCY (reward chính) ═══
-        # Baseline = chi phí OD tối thiểu cho workload hiện tại
-        # dùng cheapest type (m5.large $0.096/h) × số job cần serve
-        cheapest_od = min(t.ondemand_price for t in INSTANCE_TYPES)
-        jobs_to_serve = max(self.running_jobs + self.pending_jobs, 1)
-        jobs_to_serve = min(jobs_to_serve, MAX_INSTANCES)  # cap
-        baseline_cost = jobs_to_serve * cheapest_od
+        # Accumulate for state feature [33] budget_spent_ratio
+        self.cumulative_baseline_od_cost += baseline_od_cost
 
-        # Nếu không có job → không cần instance → baseline = 0 → step_cost = penalty thuần
-        if self.running_jobs == 0 and self.pending_jobs == 0:
-            baseline_cost = 0.0
-
-        cost_efficiency = baseline_cost - self.step_cost  # có thể âm nếu overprov
+        # savings > 0 khi step_cost thấp hơn "cost nếu chạy đủ OD cho workload"
+        # savings < 0 khi over-provision (fleet quá lớn → step_cost > baseline)
+        savings = baseline_od_cost - self.step_cost
 
         # ═══ 2. SLA PENALTY ═══
         sla_penalty = self.step_failed_jobs * self.sla_penalty_coeff
 
-        # Pending penalty (underprovisioning): scale theo số job đang chờ
-        if self.pending_jobs > 0 and total_instances == 0:
-            pending_penalty = 3.0  # idle khi có job → rất tệ
-        elif self.pending_jobs > total_cap * 0.3:
-            pending_penalty = 1.0  # over capacity by >30% → thiếu
-        else:
-            pending_penalty = 0.0
-
         # ═══ 3. INTERRUPT PENALTY ═══
         interrupt_penalty = self.step_interruptions * self.interrupt_penalty_coeff
 
-        # ═══ 4. STABILITY PENALTY (gộp: wasted + churn + concentration) ═══
-        stability_penalty = 0.0
+        # ═══ 4. MIGRATION PENALTIES (split by op type) ═══
+        migration_penalty = (
+            self.step_convert_to_od   * self.convert_to_od_penalty_coeff
+            + self.step_convert_to_spot * self.convert_to_spot_penalty_coeff
+            + self.step_rebalance       * self.rebalance_penalty_coeff
+        )
 
-        # Wasted action (request vô ích khi idle, terminate pool rỗng, etc.)
-        if self.step_wasted_action:
-            if self.idle_streak >= 6:
-                stability_penalty += 2.0
-            elif self.idle_streak >= 3:
-                stability_penalty += 1.0
-            else:
-                stability_penalty += 0.3
-
-        # Churn (flip-flop request/terminate)
-        if self.churn_streak >= 2:
-            stability_penalty += (self.churn_streak - 1) * 0.3
-
-        # Concentration (dồn quá nhiều vào 1 AZ)
-        if total_instances > 3:  # chỉ phạt khi có >3 instances
+        # ═══ 5. CONCENTRATION PENALTY ═══
+        concentration_penalty = 0.0
+        total_instances = self._total_instances()
+        if total_instances > 0:
             az_counts = np.zeros(N_AZS)
             for (_, az_idx), pool in self.pools.items():
                 az_counts[az_idx] += pool.spot_count + pool.ondemand_count
             concentration = float(np.max(az_counts)) / total_instances
             if concentration > self.concentration_threshold:
-                stability_penalty += (concentration - self.concentration_threshold) * 2.0
+                concentration_penalty = (
+                    (concentration - self.concentration_threshold)
+                    * self.concentration_penalty_coeff
+                )
 
-        # Migration cost (trừ khi migrate về spot — đó là hành vi tốt)
-        if self.step_migrations > 0 and not self.step_migrate_to_spot \
-                and not self.step_migrate_spot_to_spot:
-            stability_penalty += self.step_migrations * self.migration_penalty_coeff
-
-        # Unnecessary OD emergency
-        if self.step_unnecessary_od:
-            stability_penalty += 1.5
-
-        # ═══ 5. SMART BONUS (proactive good behaviors) ═══
-        smart_bonus = 0.0
-        # a) CONVERT_TO_SPOT khi market ổn (migrate back sau phase OD)
-        if self.step_migrate_to_spot and self.steps_since_migrate_to_od >= 2:
-            avg_interr = float(np.mean([
-                self.market_sim.get_pool_interrupt_prob(t, az)
-                for (t, az) in self.pools
-            ]))
-            if avg_interr < 0.2:
-                smart_bonus += 1.0
-        # b) REBALANCE_SPOT: thưởng khi move sang pool rẻ hơn
-        if self.step_migrate_spot_to_spot:
-            smart_bonus += 0.5
-        # c) RESERVE_CAPACITY justified: thưởng nhỏ vì reserve đúng lúc (phòng interrupt).
-        # Agent học dùng action này proactively thay vì reactive sau khi SLA đã fail.
-        if self.step_reserved_capacity:
-            smart_bonus += 0.7
-
-        # ═══ TỔNG ═══
-        reward = (
-            cost_efficiency
-            - sla_penalty
-            - pending_penalty
-            - interrupt_penalty
-            - stability_penalty
-            + smart_bonus
+        # ═══ 6. OVER-PROVISION PENALTY — v13-fix ═══
+        # Phạt khi fleet vCPU vượt xa workload cần (idle capacity)
+        # → chống agent "spam REQUEST_OD để không bao giờ fail SLA"
+        total_fleet_vcpu = sum(
+            (p.spot_count + p.ondemand_count) * INSTANCE_TYPES[t].vcpus
+            for (t, _), p in self.pools.items()
         )
+        # Cho phép buffer 50% cho job tới (forecast)
+        target_vcpu = (self.pending_jobs + self.running_jobs) * 1.5
+        idle_vcpu = max(0, total_fleet_vcpu - target_vcpu)
+        # Penalty scale: $0.05 per idle vCPU per step (~OD m5.large 2vCPU = $0.1/step)
+        overprovision_penalty = idle_vcpu * 0.05 * self.overprovision_penalty_coeff
 
-        # Clip nhẹ để tránh outlier (baseline có thể up to 20 × 0.096 = 1.92)
-        return float(np.clip(reward, -20.0, 20.0))
+        # ═══ 7. FLEET SIZE PENALTY — v14-fix ═══
+        # Phạt mỗi instance per step. Càng nhiều instance, reward càng âm.
+        # Đẩy agent shrink fleet về workload-required size (không stack OD).
+        # Default 0.03 × 10 inst × 168 steps = 50.4 reward loss/episode → đủ mạnh.
+        total_instances = sum(p.spot_count + p.ondemand_count for p in self.pools.values())
+        fleet_size_penalty = total_instances * self.fleet_size_penalty_coeff
+
+        reward = (
+            savings
+            - sla_penalty
+            - interrupt_penalty
+            - migration_penalty
+            - concentration_penalty
+            - overprovision_penalty
+            - fleet_size_penalty
+        )
+        return float(reward)
 
     # ──────────────────────────────────────────────
     #  Observation (33 features)
@@ -658,17 +659,23 @@ class SpotOrchestratorEnv(gym.Env):
         max_od = self.max_od_price
         total_instances = max(1, self._total_instances())
 
-        # --- Per-pool data: (type_idx, az_idx) → (price_ratio, interr_prob, vcpu/$, az_idx) ---
+        # --- Per-pool data: (type_idx, az_idx) → all features for state building ---
         pool_data = []
         for t_idx in range(N_TYPES):
+            itype = INSTANCE_TYPES[t_idx]
             for az_idx in range(N_AZS):
                 price = self.market_sim.get_pool_price(t_idx, az_idx)
                 interr = self.market_sim.get_pool_interrupt_prob(t_idx, az_idx)
-                od_price = INSTANCE_TYPES[t_idx].ondemand_price
-                vcpus = INSTANCE_TYPES[t_idx].vcpus
+                od_price = itype.ondemand_price
 
                 price_ratio = price / od_price if od_price > 0 else 1.0
-                vcpu_per_dollar = vcpus / price if price > 0 else 0.0
+                vcpu_per_dollar = itype.vcpus / price if price > 0 else 0.0
+
+                # Dynamic signals from market_sim (v14)
+                sps = self.market_sim.get_pool_sps_score(t_idx, az_idx)
+                cv = self.market_sim.get_pool_price_cv(t_idx, az_idx)
+                rebal = self.market_sim.get_pool_rebalance_flag(t_idx, az_idx)
+                term = self.market_sim.get_pool_termination_flag(t_idx, az_idx)
 
                 pool_data.append({
                     'type_idx': t_idx,
@@ -677,6 +684,15 @@ class SpotOrchestratorEnv(gym.Env):
                     'price_ratio': price_ratio,
                     'interr_prob': interr,
                     'vcpu_per_dollar': vcpu_per_dollar,
+                    # Static features (per-type, const trong episode)
+                    'base_rate': itype.base_interrupt_rate,
+                    'baseline_savings': 1.0 - itype.long_term_spot_ratio,
+                    # Dynamic signals
+                    'sps_score': sps,
+                    'price_cv': cv,
+                    # Event flags
+                    'rebalance_flag': rebal,
+                    'termination_flag': term,
                 })
 
         # Sort by price to find top-3 cheapest
@@ -688,7 +704,11 @@ class SpotOrchestratorEnv(gym.Env):
         # Feature vector
         features = []
 
-        # [0-11] Top-3 cheapest combos (4 features each)
+        # [0-29] Top-3 cheapest combos (10 features each)
+        # Layout: price_ratio, interrupt, vcpu/$, az_id,
+        #         base_rate, baseline_savings,
+        #         sps_score, price_cv,
+        #         rebalance_flag, termination_flag
         for i in range(3):
             if i < len(pool_data):
                 p = pool_data[i]
@@ -696,8 +716,17 @@ class SpotOrchestratorEnv(gym.Env):
                 features.append(np.clip(p['interr_prob'], 0, 1.0))
                 features.append(np.clip(p['vcpu_per_dollar'] / max(max_vcpu_dollar, 1e-6), 0, 1.0))
                 features.append(p['az_idx'] / max(N_AZS - 1, 1))
+                # Static
+                features.append(np.clip(p['base_rate'] / 0.1, 0, 1.0))     # normalize by 10% max
+                features.append(np.clip(p['baseline_savings'], 0, 1.0))
+                # Dynamic
+                features.append(np.clip(p['sps_score'], 0, 1.0))
+                features.append(np.clip(p['price_cv'] / 0.5, 0, 1.0))       # normalize by 50% cv max
+                # Events
+                features.append(float(p['rebalance_flag']))
+                features.append(float(p['termination_flag']))
             else:
-                features.extend([0.5, 0.1, 0.5, 0.0])
+                features.extend([0.5, 0.1, 0.5, 0.0, 0.2, 0.65, 0.8, 0.1, 0.0, 0.0])
 
         # [12-14] Multi-AZ aggregated
         az_avg_prices = np.zeros(N_AZS)
@@ -764,9 +793,9 @@ class SpotOrchestratorEnv(gym.Env):
         avg_wait = self.queue_wait_accumulator / max(1, self.current_step)
         features.append(min(avg_wait / MAX_WAIT, 1.0))  # [24] (capped)
 
-        # [25-27] Time
-        hour = self.current_step % 24
-        day = (self.current_step // 24) % 7
+        # [43-45] Time — v14: 1 step = 15 min (was 1h)
+        hour = (self.current_step // 4) % 24   # 4 steps = 1 hour
+        day = (self.current_step // (4 * 24)) % 7
         progress = self.current_step / max(self.max_steps, 1)
 
         features.append(hour / 23.0)  # [25]
@@ -815,9 +844,12 @@ class SpotOrchestratorEnv(gym.Env):
         features.append(np.clip(sla_health, 0, 1.0))  # [32]
 
         # [33-41] Extra context features
-        # [33] budget_spent_ratio: tổng chi phí so với baseline full OD
-        baseline_od_total = self.baseline_od_cost_per_step * max(self.current_step, 1)
-        budget_spent_ratio = np.clip(self.total_cost / max(baseline_od_total, 1e-6), 0.0, 2.0) / 2.0
+        # [33] budget_spent_ratio: total_cost / cumulative baseline OD cost
+        # cumulative_baseline = Σ over steps of (fleet_size × od_price_per_type).
+        # ratio ~1.0 = chạy gần full OD, ratio <0.5 = dùng spot hiệu quả.
+        budget_spent_ratio = np.clip(
+            self.total_cost / max(self.cumulative_baseline_od_cost, 1e-6), 0.0, 2.0
+        ) / 2.0
         features.append(float(budget_spent_ratio))
 
         # [34] idle_spot_vcpu_ratio: spot vCPU đang bị lãng phí
@@ -1046,6 +1078,12 @@ class SpotOrchestratorEnv(gym.Env):
                 # REBALANCE_SPOT — target pool phải còn slot
                 if pool_full:
                     mask[encode_action(Operation.REBALANCE_SPOT, t, az)] = False
+
+                # COOLDOWN — block all pool-targeted ops while cooldown active
+                if self.pool_cooldown[(t, az)] > 0:
+                    for op_id in range(8):  # all 8 pool-targeted ops
+                        mask[op_id * N_POOLS + t * N_AZS + az] = False
+                    continue
 
                 # RESERVE_CAPACITY — cần justification (global OR pool-local high risk)
                 # Khác PROVISION_ONDEMAND: bypass capacity_saturated guard vì đây là

@@ -29,6 +29,8 @@ class SpotMarketSimulator:
         instance_type: str = "m5.large",
         availability_zone: str = "us-east-1a",
         noise_std: float = 0.005,
+        base_interrupt_rate: float = 0.02,
+        interrupt_alpha: float = 0.5,
         seed: Optional[int] = None,
     ):
         """
@@ -74,7 +76,6 @@ class SpotMarketSimulator:
         self.has_features = 'est_interruption_prob' in filtered_data.columns
         if self.has_features:
             self.precomputed_interr_prob = filtered_data['est_interruption_prob'].values
-            # preprocess.py outputs: price_volatility_24h, price_ma_6h, price_ma_24h
             self.precomputed_volatility = filtered_data.get(
                 'price_volatility_24h', filtered_data.get(
                     'volatility_24h', pd.Series(np.zeros(self.data_len))
@@ -86,6 +87,26 @@ class SpotMarketSimulator:
             self.precomputed_ma_24h = filtered_data.get(
                 'price_ma_24h', pd.Series(self.prices)
             ).values
+            # v14 new columns
+            self.precomputed_capacity = filtered_data.get(
+                'capacity_depth', pd.Series(np.full(self.data_len, 0.8))
+            ).values
+            self.precomputed_sps = filtered_data.get(
+                'sps_score', pd.Series(np.full(self.data_len, 0.8))
+            ).values
+            self.precomputed_price_cv = filtered_data.get(
+                'price_cv_24h', pd.Series(np.zeros(self.data_len))
+            ).values
+            self.precomputed_rebalance = filtered_data.get(
+                'rebalance_flag', pd.Series(np.zeros(self.data_len))
+            ).values
+            self.precomputed_termination = filtered_data.get(
+                'termination_flag', pd.Series(np.zeros(self.data_len))
+            ).values
+
+        # Per-type interruption model params
+        self._base_rate = base_interrupt_rate
+        self._alpha = interrupt_alpha
 
         # Tính thống kê toàn cục để bound noise
         self.global_mean = float(np.mean(self.prices))
@@ -97,6 +118,11 @@ class SpotMarketSimulator:
         self.start_offset = 0
         self.current_price = 0.0
         self.interruption_prob = 0.0
+        # v14 signals
+        self.current_sps = 0.8
+        self.current_price_cv = 0.0
+        self.current_rebalance_flag = 0.0
+        self.current_termination_flag = 0.0
         self.price_history = []
         self.interruption_history = []  # Track interruptions cho frequency calc
 
@@ -124,8 +150,16 @@ class SpotMarketSimulator:
         # Interruption prob ban đầu
         if self.has_features:
             self.interruption_prob = float(self.precomputed_interr_prob[self.start_offset])
+            self.current_sps = float(self.precomputed_sps[self.start_offset])
+            self.current_price_cv = float(self.precomputed_price_cv[self.start_offset])
+            self.current_rebalance_flag = float(self.precomputed_rebalance[self.start_offset])
+            self.current_termination_flag = float(self.precomputed_termination[self.start_offset])
         else:
             self.interruption_prob = 0.05
+            self.current_sps = 0.8
+            self.current_price_cv = 0.0
+            self.current_rebalance_flag = 0.0
+            self.current_termination_flag = 0.0
 
     def step(self) -> Tuple[float, float, bool]:
         """
@@ -149,12 +183,17 @@ class SpotMarketSimulator:
         # Tính xác suất gián đoạn
         if self.has_features:
             # Dùng pre-computed interruption probability
-            self.interruption_prob = float(self.precomputed_interr_prob[price_index])
-            # Thêm một chút random variation
-            noise = self.rng.normal(0, 0.02)
+            base_prob = float(self.precomputed_interr_prob[price_index])
+            # Multiplicative noise: ±20% relative variation giữ signal shape
+            noise_factor = 1.0 + self.rng.normal(0, 0.2)
             self.interruption_prob = float(np.clip(
-                self.interruption_prob + noise, 0.01, 0.5
+                base_prob * noise_factor, 0.01, 0.50
             ))
+            # v14 signals — read precomputed, no noise (deterministic for agent)
+            self.current_sps = float(self.precomputed_sps[price_index])
+            self.current_price_cv = float(self.precomputed_price_cv[price_index])
+            self.current_rebalance_flag = float(self.precomputed_rebalance[price_index])
+            self.current_termination_flag = float(self.precomputed_termination[price_index])
         else:
             # Fallback: tính từ price history
             self.interruption_prob = self._compute_interruption_prob()
@@ -172,25 +211,22 @@ class SpotMarketSimulator:
         return float(np.clip(noisy_price, self.global_min, self.global_max))
 
     def _compute_interruption_prob(self) -> float:
-        """Tính interruption probability từ price history khi không có pre-computed features."""
+        """Fallback: tính interruption prob từ price history theo công thức chuẩn.
+
+        P = base_rate + max(0, (price_current / MA_24h - 1) * alpha)
+        Dùng khi CSV không có cột est_interruption_prob.
+        """
         if len(self.price_history) < 6:
-            return 0.05
+            return self._base_rate
 
-        recent_prices = self.price_history[-24:] if len(self.price_history) >= 24 else self.price_history
-        recent_avg = np.mean(recent_prices)
+        ma_24h = np.mean(
+            self.price_history[-24:] if len(self.price_history) >= 24 else self.price_history
+        )
+        if ma_24h <= 0:
+            return self._base_rate
 
-        if recent_avg <= 0:
-            return 0.05
-
-        # Giá cao hơn trung bình → interrupt probability cao hơn
-        price_ratio = self.current_price / recent_avg
-
-        # Biến động cao → interrupt probability cao hơn
-        volatility = np.std(recent_prices) / recent_avg if recent_avg > 0 else 0
-
-        # Kết hợp cả 2 tín hiệu
-        prob = 0.02 + max(0, (price_ratio - 1.0)) * 0.3 + volatility * 0.5
-        return float(np.clip(prob, 0.01, 0.4))
+        prob = self._base_rate + max(0.0, (self.current_price / ma_24h - 1.0) * self._alpha)
+        return float(np.clip(prob, 0.01, 0.40))
 
     def get_price_statistics(self, window: int = 24) -> dict:
         """
@@ -281,9 +317,19 @@ class MultiPoolMarketSimulator:
         self.n_azs = len(availability_zones)
         self.rng = np.random.default_rng(seed)
 
+        # Load per-type interrupt params from instance catalog
+        try:
+            from envs.instance_catalog import INSTANCE_TYPES as _CATALOG
+            _catalog_map = {t.name: t for t in _CATALOG}
+        except ImportError:
+            _catalog_map = {}
+
         # Create one SpotMarketSimulator per (type, AZ)
         self.sims = {}
         for t_idx, itype in enumerate(instance_types):
+            cat = _catalog_map.get(itype)
+            base_rate = cat.base_interrupt_rate if cat else 0.02
+            alpha     = cat.interrupt_alpha     if cat else 0.5
             for az_idx, az in enumerate(availability_zones):
                 sub_seed = None
                 if seed is not None:
@@ -293,6 +339,8 @@ class MultiPoolMarketSimulator:
                     instance_type=itype,
                     availability_zone=az,
                     noise_std=noise_std,
+                    base_interrupt_rate=base_rate,
+                    interrupt_alpha=alpha,
                     seed=sub_seed,
                 )
 
@@ -326,6 +374,22 @@ class MultiPoolMarketSimulator:
     def get_pool_interrupt_prob(self, type_idx: int, az_idx: int) -> float:
         """Get current interruption probability for a pool."""
         return self.sims[(type_idx, az_idx)].interruption_prob
+
+    def get_pool_sps_score(self, type_idx: int, az_idx: int) -> float:
+        """Get current SPS-proxy health score for a pool (0=danger, 1=healthy)."""
+        return self.sims[(type_idx, az_idx)].current_sps
+
+    def get_pool_price_cv(self, type_idx: int, az_idx: int) -> float:
+        """Get current 24h price CV (volatility/mean) for a pool."""
+        return self.sims[(type_idx, az_idx)].current_price_cv
+
+    def get_pool_rebalance_flag(self, type_idx: int, az_idx: int) -> float:
+        """Rebalance recommendation flag (0/1): pool showing early warning."""
+        return self.sims[(type_idx, az_idx)].current_rebalance_flag
+
+    def get_pool_termination_flag(self, type_idx: int, az_idx: int) -> float:
+        """Termination warning flag (0/1): pool will be lost soon."""
+        return self.sims[(type_idx, az_idx)].current_termination_flag
 
     def get_all_prices(self) -> np.ndarray:
         """Get price matrix (n_types, n_azs)."""
