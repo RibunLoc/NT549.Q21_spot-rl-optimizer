@@ -23,16 +23,18 @@ logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────
-#  Daily price profile (24h) — dang U-shape nhu AWS thuc te
-#  Index = gio trong ngay, value = he so nhan voi base price
+#  Daily price profile (24h) — AWS thực tế: cực kỳ flat
+#  Spot prices trên AWS hầu như không có daily seasonality rõ ràng
+#  (không như on-demand; spot driven bởi capacity availability, không phải demand)
+#  Calibrated từ AWS console chart: c5.2xlarge ap-southeast-1, 3 months
 # ──────────────────────────────────────────────
 HOURLY_PROFILE = np.array([
     # 0h    1h    2h    3h    4h    5h    6h    7h
-    0.90, 0.88, 0.86, 0.85, 0.85, 0.87, 0.90, 0.95,
+    1.00, 1.00, 0.99, 0.99, 0.99, 1.00, 1.00, 1.00,
     # 8h    9h   10h   11h   12h   13h   14h   15h
-    1.00, 1.08, 1.12, 1.15, 1.13, 1.10, 1.12, 1.15,
+    1.01, 1.01, 1.02, 1.02, 1.01, 1.01, 1.02, 1.02,
     # 16h   17h   18h   19h   20h   21h   22h   23h
-    1.12, 1.08, 1.02, 0.98, 0.95, 0.93, 0.92, 0.91,
+    1.01, 1.01, 1.00, 1.00, 1.00, 1.00, 1.00, 1.00,
 ])
 
 
@@ -189,7 +191,8 @@ def generate_spot_prices(
     spike_magnitudes = np.zeros(num_hours)
     for h in range(num_hours):
         if spike_events[h]:
-            spike_magnitudes[h] = rng.uniform(1.3, spike_multiplier)
+            low = min(1.1, spike_multiplier * 0.85)
+            spike_magnitudes[h] = rng.uniform(low, spike_multiplier)
 
     # Expand spikes to 5-min resolution voi exponential decay
     spike_overlay = np.zeros(num_points)
@@ -214,9 +217,19 @@ def generate_spot_prices(
     all_prices = []
 
     for az in availability_zones:
-        # Moi AZ co base price hoi khac (+/- 3%)
-        az_offset = rng.uniform(-0.03, 0.03)
+        # Mỗi AZ có base price hơi khác (~2-4% total spread)
+        # AWS thực: c5.2xlarge ap-southeast-1 AZ spread ~$0.004/$0.175 = ~2.3%
+        az_offset = rng.uniform(-0.02, 0.02)
         az_base = base_price * (1.0 + az_offset)
+
+        # Per-AZ slow random walk on the mean-reversion target
+        # Mô phỏng AZ-level capacity drift độc lập với common market signal
+        # Walk speed: ~0.5% per day → tạo AZ divergence tự nhiên theo thời gian
+        az_drift = np.zeros(num_points)
+        drift_sigma = az_base * 0.003 * np.sqrt(dt)  # 0.3% daily drift per AZ
+        for i in range(1, num_points):
+            az_drift[i] = az_drift[i-1] * 0.998 + rng.normal(0, drift_sigma)  # slow-decay walk
+        az_drift = np.clip(az_drift, -az_base * 0.05, az_base * 0.05)
 
         # AZ-specific noise (phan khong correlated)
         az_noise = rng.normal(0, 1, num_points)
@@ -235,7 +248,8 @@ def generate_spot_prices(
         prices[0] = az_base * HOURLY_PROFILE[0]
 
         for i in range(1, num_points):
-            target = seasonal_targets[i] * (az_base / base_price)
+            # Per-AZ target includes slow independent drift → breaks AZ correlation
+            target = seasonal_targets[i] * (az_base / base_price) + az_drift[i]
 
             # Mean-reversion pull
             pull = mean_reversion_speed * (target - prices[i - 1])
@@ -255,8 +269,9 @@ def generate_spot_prices(
                 spike_target = target * (1.0 + spike_overlay[i] * 0.3)
                 new_price += 0.3 * (spike_target - new_price)
 
-            # Hard bounds: 60% - 300% base price
-            new_price = np.clip(new_price, az_base * 0.6, az_base * 3.0)
+            # Hard bounds: 85% - 200% base price
+            # AWS thực: spot ít khi xuống dưới 85% long-term mean hoặc vượt 2x
+            new_price = np.clip(new_price, az_base * 0.85, az_base * 2.0)
 
             prices[i] = new_price
 
@@ -288,45 +303,56 @@ def generate_spot_prices(
 #  Preset scenarios
 # ──────────────────────────────────────────────
 SCENARIOS = {
+    # Calibrated từ AWS console: c5.2xlarge ap-southeast-1, Feb-May 2026
+    # Chart đặc điểm: cực kỳ flat (std/mean ~2%), AZ spread ~3%, ~0 spikes/3 months
+    # Đây là behavior thực tế của most spot instances ở ap-southeast-1
     'stable': {
-        'volatility': 0.08,
-        'mean_reversion_speed': 0.20,
-        'peak_hour_strength': 0.8,
-        'weekend_discount': 0.10,
-        'spike_prob_per_hour': 0.003,
-        'spike_multiplier': 1.5,
-        'spike_decay_hours': 2.0,
+        'volatility': 0.02,             # AWS thực: std/mean ~1-2% cho stable types
+        'mean_reversion_speed': 0.30,   # Strong reversion → giữ giá gần flat
+        'peak_hour_strength': 0.1,      # Gần 0: không có daily pattern rõ
+        'weekend_discount': 0.02,       # AWS spot: weekend effect rất nhỏ (<2%)
+        'spike_prob_per_hour': 0.0003,  # ~0.6 spikes/90 days ≈ 0 (chart: 0 spikes)
+        'spike_multiplier': 1.2,        # Micro-spike chỉ +20%
+        'spike_decay_hours': 1.0,
         'seed': 42,
     },
+    # Volatile: instance family có demand cao hơn (GPU-adjacent, burstable)
+    # Vẫn realistic nhưng có thể xảy ra ở busy regions/AZs
+    # Ví dụ: c5n, g4dn trong us-east-1 busy periods
     'volatile': {
-        'volatility': 0.25,
-        'mean_reversion_speed': 0.08,
-        'peak_hour_strength': 1.5,
-        'weekend_discount': 0.20,
-        'spike_prob_per_hour': 0.03,
-        'spike_multiplier': 2.5,
-        'spike_decay_hours': 4.0,
+        'volatility': 0.08,             # 3-4x stable, vẫn trong khoảng AWS observe
+        'mean_reversion_speed': 0.15,
+        'peak_hour_strength': 0.3,      # Rất nhỏ
+        'weekend_discount': 0.05,
+        'spike_prob_per_hour': 0.005,   # ~11 spikes/90d — "volatile" nhưng plausible
+        'spike_multiplier': 1.6,        # +60% max spike
+        'spike_decay_hours': 2.0,
         'seed': 123,
     },
+    # Spike scenario: mô phỏng re:Invent week / EC2 capacity crunch
+    # Xảy ra vài lần/năm — agent cần biết handle nhưng không overfit
     'spike': {
-        'volatility': 0.15,
-        'mean_reversion_speed': 0.12,
-        'peak_hour_strength': 2.0,
-        'weekend_discount': 0.05,
-        'spike_prob_per_hour': 0.06,
-        'spike_multiplier': 3.5,
-        'spike_decay_hours': 6.0,
+        'volatility': 0.10,
+        'mean_reversion_speed': 0.10,
+        'peak_hour_strength': 0.2,
+        'weekend_discount': 0.03,
+        'spike_prob_per_hour': 0.012,   # ~26 spikes/90d = ~1 spike/3.5 days
+        'spike_multiplier': 2.2,        # Spike lên tới +120% — dramatic but real
+        'spike_decay_hours': 4.0,
         'seed': 456,
     },
+    # AZ divergence: một AZ bị capacity pressure do Reserved/OD booking
+    # Giá AZ bị ảnh hưởng tăng nhẹ, nhưng AZ khác vẫn flat
+    # az_correlation=0.25: AZs hầu như độc lập (thực tế khi AZ bị isolate)
     'az_divergence': {
-        'volatility': 0.10,
-        'mean_reversion_speed': 0.15,
-        'peak_hour_strength': 1.0,
-        'weekend_discount': 0.15,
-        'spike_prob_per_hour': 0.01,
-        'spike_multiplier': 2.0,
+        'volatility': 0.05,
+        'mean_reversion_speed': 0.20,
+        'peak_hour_strength': 0.1,
+        'weekend_discount': 0.02,
+        'spike_prob_per_hour': 0.003,
+        'spike_multiplier': 1.5,
         'spike_decay_hours': 3.0,
-        'az_correlation': 0.3,  # low correlation → AZs diverge more
+        'az_correlation': 0.25,         # Low correlation → AZ prices diverge
         'seed': 789,
     },
 }
@@ -369,14 +395,18 @@ def main():
     azs = region_azs.get(args.region,
                          [f"{args.region}a", f"{args.region}b", f"{args.region}c"])
 
-    # Instance type defaults — base_price ≈ 30-40% of on-demand price
+    # Instance type defaults — base_price calibrated từ AWS console thực tế
+    # ap-southeast-1, 3 months (Feb-May 2026): spot/OD ratio ~55-57%
+    # c5.2xlarge: OD=$0.392, spot avg=$0.175 → ratio=44.6% (cheapest AZ)
+    # m5.large:   OD=$0.096, spot avg=$0.054 → ratio=56% (estimated)
+    # Note: ap-southeast-1 thường cao hơn us-east-1 ~15-20%
     instance_defaults = {
-        'm5.large':   {'base_price': 0.034},   # OD=0.096
-        'c5.xlarge':  {'base_price': 0.060},   # OD=0.170
-        'r5.large':   {'base_price': 0.044},   # OD=0.126
-        'm5.xlarge':  {'base_price': 0.067},   # OD=0.192
-        'c5.2xlarge': {'base_price': 0.119},   # OD=0.340
-        'r6i.xlarge': {'base_price': 0.140},   # OD=0.252
+        'm5.large':   {'base_price': 0.054},   # OD=0.096 → 56% ratio
+        'c5.xlarge':  {'base_price': 0.094},   # OD=0.170 → 55% ratio
+        'r5.large':   {'base_price': 0.069},   # OD=0.126 → 55% ratio
+        'm5.xlarge':  {'base_price': 0.106},   # OD=0.192 → 55% ratio
+        'c5.2xlarge': {'base_price': 0.175},   # OD=0.340 → 51% ratio (AWS actual avg)
+        'r6i.xlarge': {'base_price': 0.140},   # OD=0.252 → 56% ratio
     }
 
     output_dir = Path(args.output)
