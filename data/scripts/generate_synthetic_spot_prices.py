@@ -21,6 +21,15 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# On-demand prices per type ($/hr) — mirrors envs/instance_catalog.py
+_OD_PRICES = {
+    "m5.large":   0.096,
+    "c5.xlarge":  0.170,
+    "r5.large":   0.126,
+    "m5.xlarge":  0.192,
+    "c5.2xlarge": 0.340,
+}
+
 
 # ──────────────────────────────────────────────
 #  Daily price profile (24h) — AWS thực tế: cực kỳ flat
@@ -504,8 +513,33 @@ def main():
                 cap_col[i] = capacity[key][idx]
             cap_counters[key] = idx + 1
         combined['capacity_depth'] = cap_col
+
+        # SPS score: correlated với capacity_depth nhưng có noise độc lập
+        # Mô hình: sps = clip(capacity * 0.7 + price_signal * 0.3 + noise, 0, 1)
+        # Ý nghĩa: capacity thấp → SPS thấp (khó launch), nhưng SPS còn phụ thuộc
+        # demand pressure (giá cao = nhiều người cũng đang request → SPS thấp hơn)
+        rng_sps = np.random.default_rng(seed + 999)
+        price_col = combined['spot_price'].values
+        price_ratios = np.zeros(len(combined))
+        for itype in instance_types:
+            mask = combined['instance_type'] == itype
+            od_price = _OD_PRICES.get(itype, float(price_col[mask].mean()) * 3.0)
+            price_ratios[mask] = np.clip(price_col[mask] / od_price, 0.0, 1.5)
+
+        # price_pressure: giá cao → nhiều demand → SPS giảm
+        price_pressure = np.clip(price_ratios / 1.5, 0.0, 1.0)  # normalize to [0,1]
+
+        # SPS = 70% capacity + 30% inverse price pressure + small noise
+        sps_noise = rng_sps.normal(0, 0.04, size=len(combined))
+        sps_col = 0.70 * cap_col + 0.30 * (1.0 - price_pressure) + sps_noise
+        sps_col = np.clip(sps_col, 0.0, 1.0)
+        combined['sps_score'] = sps_col
+
         logger.info(f"  Capacity signal: mean={cap_col.mean():.3f} "
                     f"min={cap_col.min():.3f} p5={np.percentile(cap_col, 5):.3f}")
+        logger.info(f"  SPS score:       mean={sps_col.mean():.3f} "
+                    f"min={sps_col.min():.3f} p5={np.percentile(sps_col, 5):.3f} "
+                    f"corr_with_cap={np.corrcoef(cap_col, sps_col)[0,1]:.3f}")
 
         tag = scenario_name if scenario_name in SCENARIOS else args.tag
         output_file = output_dir / f"spot_prices_{args.region}_{tag}.csv"

@@ -218,6 +218,11 @@ def preprocess_multi_pool(
                     _base + np.maximum(0, (feat['price_trend'] - 1.0) * _alpha), 0.01, 0.30
                 )
             feat = feat.reset_index().rename(columns={'index': 'timestamp'})
+            # Normalize to datetime64[ns] (tz-naive) for cross-version pickle compatibility
+            ts = feat['timestamp']
+            if hasattr(ts.dtype, 'tz') and ts.dtype.tz is not None:
+                ts = ts.dt.tz_convert('UTC').dt.tz_localize(None)
+            feat['timestamp'] = ts.astype('datetime64[ns]')
             all_features.append(feat)
 
             logger.info(f"  {itype} @ {az}: {len(feat)} records, "
@@ -250,12 +255,43 @@ def main():
                         help='Multi-pool mode: preprocess all types × AZs')
     parser.add_argument('--instance-types', type=str, default=None,
                         help='Comma-separated instance types for multi-pool mode')
+    parser.add_argument('--per-scenario', action='store_true',
+                        help='Output one pkl per scenario (multipool_stable.pkl, etc.) for Kaggle dataset')
 
     args = parser.parse_args()
 
     input_dir = Path(args.input)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    instance_types = None
+    if args.instance_types:
+        instance_types = [t.strip() for t in args.instance_types.split(',')]
+
+    # --per-scenario: preprocess each raw CSV independently → multipool_{scenario}.pkl
+    if args.per_scenario:
+        spot_files = sorted(input_dir.glob(args.input_glob))
+        if not spot_files:
+            logger.error("No spot price CSV files found")
+            return
+        for f in spot_files:
+            # Extract scenario name from filename: spot_prices_ap-southeast-1_stable.csv → stable
+            stem = f.stem  # e.g. spot_prices_ap-southeast-1_stable
+            # Remove prefix "spot_prices_{region}_" to get scenario name
+            # handles both "stable" and "az_divergence"
+            parts = stem.split('_', 3)  # ['spot', 'prices', 'ap-southeast-1', 'stable'] or 4th='az_divergence'
+            scenario = parts[3] if len(parts) >= 4 else stem.split('_')[-1]
+            logger.info(f"\n=== Processing scenario: {scenario} ({f.name}) ===")
+            df = pd.read_csv(f)
+            # Filter to ap-southeast AZs only
+            if 'availability_zone' in df.columns:
+                df = df[df['availability_zone'].str.contains('ap-southeast')]
+            features_df = preprocess_multi_pool(df, instance_types=instance_types)
+            out_base = output_dir / f'multipool_{scenario}'
+            features_df.to_csv(f'{out_base}.csv', index=False)
+            logger.info(f"Saved {out_base}.csv  ({len(features_df):,} rows)")
+        logger.info("\nAll scenarios done.")
+        return
 
     # Load spot price CSVs
     spot_files = list(input_dir.glob(args.input_glob))
@@ -269,13 +305,7 @@ def main():
 
     # Preprocess
     if args.multi_pool:
-        instance_types = None
-        if args.instance_types:
-            instance_types = [t.strip() for t in args.instance_types.split(',')]
-        features_df = preprocess_multi_pool(
-            spot_df,
-            instance_types=instance_types,
-        )
+        features_df = preprocess_multi_pool(spot_df, instance_types=instance_types)
     else:
         features_df = preprocess_spot_prices(
             spot_df,

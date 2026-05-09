@@ -68,7 +68,7 @@ N_TOP_K_FEATURES = 10
 N_MULTI_AZ = 3              # spread, cheapest_az, concentration
 N_MULTI_TYPE = 3            # price_rank, interrupt_rank, vcpu_ratio
 N_INFRA = 3                 # spot, ondemand, capacity
-N_WORKLOAD = 4              # pending, running, forecast, queue_wait
+N_WORKLOAD = 6              # pending, running, forecast, queue_wait, avg_cpu_demand, avg_ram_demand
 N_TIME = 3                  # hour, day, progress
 N_CURRENT = 5               # avg_price, avg_interrupt, spot_ratio, cost_rate, sla_health
 N_EXTRA = 9                 # budget, idle_spot, trend, interrupt_streak,
@@ -77,17 +77,17 @@ N_POOL_CPU = N_TYPES * N_AZS   # 15: per-pool CPU util
 N_POOL_RAM = N_TYPES * N_AZS   # 15: per-pool RAM util
 
 STATE_DIM = (
-    N_TOP_K * N_TOP_K_FEATURES   # 12
+    N_TOP_K * N_TOP_K_FEATURES   # 30
     + N_MULTI_AZ                  # 3
     + N_MULTI_TYPE                # 3
     + N_INFRA                     # 3
-    + N_WORKLOAD                  # 4
+    + N_WORKLOAD                  # 6
     + N_TIME                      # 3
     + N_CURRENT                   # 5
     + N_EXTRA                     # 9
     + N_POOL_CPU                  # 15
     + N_POOL_RAM                  # 15
-)  # = 72
+)  # = 92
 
 # ─── Environment constraints ─────────────────────────────────────────────────
 MAX_INSTANCES = 20                                                 # across all pools

@@ -1,8 +1,6 @@
-# pack_kaggle.ps1
-# Tao file zip de upload len Kaggle va chay training
+# pack_kaggle.ps1 — Tao file zip de upload len Kaggle
 # Usage: .\pack_kaggle.ps1
 
-$ErrorActionPreference = "Stop"
 $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
 $OUT  = "$ROOT\spot_rl_kaggle.zip"
 
@@ -11,96 +9,61 @@ Write-Host "Root  : $ROOT"
 Write-Host "Output: $OUT"
 Write-Host ""
 
-# Xoa zip cu neu co
-if (Test-Path $OUT) {
-    Remove-Item $OUT
-    Write-Host "Removed old zip." -ForegroundColor Yellow
+# Kiem tra pkl truoc khi chay
+$pklCount = (Get-ChildItem "$ROOT\data\processed" -Filter "multipool_*.csv" -ErrorAction SilentlyContinue).Count
+if ($pklCount -lt 4) {
+    Write-Host "[!] Only $pklCount multipool_*.csv files found — need 4. Run preprocess first:" -ForegroundColor Red
+    Write-Host "    python data/scripts/preprocess.py --per-scenario --instance-types m5.large,c5.xlarge,r5.large,m5.xlarge,c5.2xlarge" -ForegroundColor Yellow
+    exit 1
 }
 
-# Thu muc tam de chuan bi noi dung
-$TMP = "$env:TEMP\spot_rl_pack"
-if (Test-Path $TMP) { Remove-Item $TMP -Recurse -Force }
-New-Item -ItemType Directory -Path $TMP | Out-Null
-
-# --- 1. Source code ---
-$DIRS = @("agents", "envs", "utils", "experiments")
-foreach ($d in $DIRS) {
-    $src = "$ROOT\$d"
-    $dst = "$TMP\$d"
-    Copy-Item $src $dst -Recurse
-    Get-ChildItem $dst -Recurse -Filter "__pycache__" | Remove-Item -Recurse -Force
-    Write-Host "  [+] $d\" -ForegroundColor Green
-}
-
-# --- 2. Data processed (.csv - text format, cross-version pandas compat) ---
-$DATA_DST = "$TMP\data\processed"
-New-Item -ItemType Directory -Path $DATA_DST | Out-Null
-$csvFiles = Get-ChildItem "$ROOT\data\processed" -Filter "multipool_*.csv"
-foreach ($f in $csvFiles) {
-    Copy-Item $f.FullName "$DATA_DST\$($f.Name)"
-    $sizeMB = [math]::Round($f.Length / 1MB, 1)
-    Write-Host "  [+] data/processed/$($f.Name) ($sizeMB MB)" -ForegroundColor Green
-}
-
-# --- 3. Notebooks (Kaggle + RunPod) ---
-$NB_DST = "$TMP\notebooks"
-New-Item -ItemType Directory -Path $NB_DST | Out-Null
-Copy-Item "$ROOT\notebooks\kaggle_train.ipynb" "$NB_DST\kaggle_train.ipynb"
-Write-Host "  [+] notebooks/kaggle_train.ipynb" -ForegroundColor Green
-if (Test-Path "$ROOT\notebooks\runpod_train.ipynb") {
-    Copy-Item "$ROOT\notebooks\runpod_train.ipynb" "$NB_DST\runpod_train.ipynb"
-    Write-Host "  [+] notebooks/runpod_train.ipynb" -ForegroundColor Green
-}
-
-# --- 4. Requirements ---
-Copy-Item "$ROOT\requirements.txt" "$TMP\requirements.txt"
-Write-Host "  [+] requirements.txt" -ForegroundColor Green
-
-# --- 4b. RunPod setup files (optional fallback target) ---
-if (Test-Path "$ROOT\requirements-train.txt") {
-    Copy-Item "$ROOT\requirements-train.txt" "$TMP\requirements-train.txt"
-    Write-Host "  [+] requirements-train.txt" -ForegroundColor Green
-}
-if (Test-Path "$ROOT\scripts\runpod_setup.sh") {
-    New-Item -ItemType Directory -Path "$TMP\scripts" -Force | Out-Null
-    Copy-Item "$ROOT\scripts\runpod_setup.sh" "$TMP\scripts\runpod_setup.sh"
-    Write-Host "  [+] scripts/runpod_setup.sh" -ForegroundColor Green
-}
-
-# --- 5. Tao zip bang Python (forward slash, tuong thich Linux/Kaggle) ---
-Write-Host ""
-Write-Host "Compressing..." -ForegroundColor Cyan
-
-$pyScript = @"
+# Delegate toan bo viec pack sang Python (cross-platform, no TMP dir needed)
+python -c @"
 import zipfile, os, sys
 
-tmp = sys.argv[1]
-out = sys.argv[2]
+ROOT = r'$ROOT'.replace('\\', '/')
+OUT  = r'$OUT'.replace('\\', '/')
 
-with zipfile.ZipFile(out, 'w', zipfile.ZIP_DEFLATED) as zf:
-    for root, dirs, files in os.walk(tmp):
-        dirs[:] = [d for d in dirs if d != '__pycache__']
-        for file in files:
-            abs_path = os.path.join(root, file)
-            # arcname dung forward slash, bo prefix thu muc tam
-            arcname = os.path.relpath(abs_path, tmp).replace(os.sep, '/')
+DIRS = ['agents', 'envs', 'utils', 'experiments']
+
+print('Packing...')
+with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as zf:
+    # Source code
+    for d in DIRS:
+        for root, dirs, files in os.walk(os.path.join(ROOT, d)):
+            dirs[:] = [x for x in dirs if x != '__pycache__']
+            for f in files:
+                if f.endswith('.pyc'): continue
+                abs_path = os.path.join(root, f)
+                arcname = os.path.relpath(abs_path, ROOT).replace(os.sep, '/')
+                zf.write(abs_path, arcname)
+        print(f'  [+] {d}/')
+
+    # Data processed — per-scenario parquet
+    processed = os.path.join(ROOT, 'data', 'processed')
+    for f in sorted(os.listdir(processed)):
+        if f.startswith('multipool_') and f.endswith('.csv'):
+            abs_path = os.path.join(processed, f)
+            arcname  = f'data/processed/{f}'
             zf.write(abs_path, arcname)
+            print(f'  [+] {arcname}  ({os.path.getsize(abs_path)/1024/1024:.1f} MB)')
 
-print(f'Zip created: {out}')
+    # Notebook
+    zf.write(os.path.join(ROOT, 'notebooks', 'kaggle_train.ipynb'), 'notebooks/kaggle_train.ipynb')
+    print('  [+] notebooks/kaggle_train.ipynb')
+
+    # Requirements
+    zf.write(os.path.join(ROOT, 'requirements.txt'), 'requirements.txt')
+    print('  [+] requirements.txt')
+
+size_mb = os.path.getsize(OUT) / 1024 / 1024
+print(f'\nDone! spot_rl_kaggle.zip ({size_mb:.1f} MB)')
+print('\ndata/processed contents:')
+with zipfile.ZipFile(OUT) as zf:
+    for n in sorted(zf.namelist()):
+        if 'processed' in n:
+            print(f'  {n}')
 "@
-
-python -c $pyScript $TMP $OUT
-Remove-Item $TMP -Recurse -Force
-
-$zipSizeMB = [math]::Round((Get-Item $OUT).Length / 1MB, 1)
-Write-Host ""
-Write-Host "Done! -> $OUT ($zipSizeMB MB)" -ForegroundColor Cyan
-Write-Host ""
-
-# --- 6. Kiem tra noi dung zip ---
-Write-Host "Contents:" -ForegroundColor White
-$zipEntries = python -c "import zipfile,sys; z=zipfile.ZipFile(sys.argv[1]); [print(' ',n) for n in z.namelist()]" $OUT
 
 Write-Host ""
 Write-Host "Upload spot_rl_kaggle.zip len Kaggle -> Datasets -> New Dataset" -ForegroundColor Yellow
-Write-Host "Path tren Kaggle: /kaggle/input/spot-rl-code/spot_rl_kaggle.zip" -ForegroundColor Yellow

@@ -68,7 +68,12 @@ class SpotOrchestratorEnv(gym.Env):
         if price_data is not None:
             self.price_data = price_data
         elif data_path is not None:
-            if data_path.endswith('.pkl'):
+            if data_path.endswith('.parquet'):
+                try:
+                    self.price_data = pd.read_parquet(data_path, engine='pyarrow')
+                except ImportError:
+                    self.price_data = pd.read_parquet(data_path, engine='fastparquet')
+            elif data_path.endswith('.pkl'):
                 self.price_data = pd.read_pickle(data_path)
             else:
                 self.price_data = pd.read_csv(data_path)
@@ -190,6 +195,7 @@ class SpotOrchestratorEnv(gym.Env):
         self.step_migrate_spot_to_spot = False      # for reward bonus
         self.step_unnecessary_od = False            # for unnecessary OD penalty
         self.step_reserved_capacity = False         # v2: proactive RESERVE_CAPACITY bonus
+        self.step_spot_launch_failed = False        # SPS-gated: launch bị AWS từ chối
         # Cumulative baseline: tổng OD cost "nếu fleet hiện tại chạy full OD" qua các steps.
         # Tích lũy bằng step chứ không snapshot lúc reset vì fleet thay đổi theo thời gian.
         self.cumulative_baseline_od_cost = 0.0
@@ -238,6 +244,7 @@ class SpotOrchestratorEnv(gym.Env):
         self.step_convert_to_spot = 0
         self.step_rebalance = 0
         self.step_interruptions = 0
+        self.step_spot_launch_failed = False
 
         # 1. Execute action
         self._execute_action(action)
@@ -293,7 +300,17 @@ class SpotOrchestratorEnv(gym.Env):
             if self.idle_streak >= 3 or at_capacity:
                 self.step_wasted_action = True
             else:
-                pool.spot_count += 1
+                # SPS-gated launch: xác suất thành công tỉ lệ thuận với SPS score.
+                # SPS 1.0 → 95% success, SPS 0.3 → ~30% success (pool gần cạn capacity).
+                # Mô phỏng AWS "InsufficientInstanceCapacity" error khi capacity thấp.
+                sps = self.market_sim.get_pool_sps_score(type_idx, az_idx)
+                launch_prob = 0.05 + 0.90 * sps  # map [0,1] → [5%, 95%]
+                if self.np_random.random() < launch_prob:
+                    pool.spot_count += 1
+                else:
+                    # Launch failed: AWS từ chối request do thiếu capacity
+                    self.step_wasted_action = True
+                    self.step_spot_launch_failed = True
 
         elif op == Operation.PROVISION_ONDEMAND:
             if self.idle_streak >= 3 or at_capacity:
@@ -334,11 +351,18 @@ class SpotOrchestratorEnv(gym.Env):
             if util > 0.8 and self.pending_jobs > 0:
                 self.step_wasted_action = True  # unsafe at peak
             elif pool.ondemand_count > 0:
-                pool.ondemand_count -= 1
-                pool.spot_count += 1
-                self.step_migrations += 1
-                self.step_convert_to_spot += 1
-                self.step_migrate_to_spot = True
+                # SPS-gated: convert cũng cần spot capacity. Realistic with AWS behavior.
+                sps = self.market_sim.get_pool_sps_score(type_idx, az_idx)
+                launch_prob = 0.05 + 0.90 * sps
+                if self.np_random.random() < launch_prob:
+                    pool.ondemand_count -= 1
+                    pool.spot_count += 1
+                    self.step_migrations += 1
+                    self.step_convert_to_spot += 1
+                    self.step_migrate_to_spot = True
+                else:
+                    self.step_wasted_action = True
+                    self.step_spot_launch_failed = True
             else:
                 self.step_wasted_action = True
 
@@ -655,7 +679,7 @@ class SpotOrchestratorEnv(gym.Env):
     # ──────────────────────────────────────────────
 
     def _get_observation(self) -> np.ndarray:
-        """Build 33-feature state vector, normalized to [0,1]."""
+        """Build state vector (STATE_DIM features), normalized to [0,1]."""
         max_od = self.max_od_price
         total_instances = max(1, self._total_instances())
 
@@ -793,14 +817,29 @@ class SpotOrchestratorEnv(gym.Env):
         avg_wait = self.queue_wait_accumulator / max(1, self.current_step)
         features.append(min(avg_wait / MAX_WAIT, 1.0))  # [24] (capped)
 
-        # [43-45] Time — v14: 1 step = 15 min (was 1h)
+        # [25-26] Workload profile — avg resource demand của pending jobs
+        pending_list = self.workload_gen.get_pending_jobs()
+        if pending_list:
+            avg_cpu = float(np.mean([j.cpu_demand for j in pending_list]))
+        else:
+            avg_cpu = 0.2  # default: light workload khi queue trống
+        features.append(np.clip(avg_cpu, 0.0, 1.0))  # [25]
+
+        MAX_JOB_RAM = 16.0  # GB, heavy job max từ workload_generator
+        if pending_list:
+            avg_ram = float(np.mean([j.ram_demand for j in pending_list]))
+        else:
+            avg_ram = 1.0
+        features.append(np.clip(avg_ram / MAX_JOB_RAM, 0.0, 1.0))  # [26]
+
+        # [27-29] Time — v14: 1 step = 15 min (was 1h)
         hour = (self.current_step // 4) % 24   # 4 steps = 1 hour
         day = (self.current_step // (4 * 24)) % 7
         progress = self.current_step / max(self.max_steps, 1)
 
-        features.append(hour / 23.0)  # [25]
-        features.append(day / 6.0)  # [26]
-        features.append(progress)  # [27]
+        features.append(hour / 23.0)  # [27]
+        features.append(day / 6.0)  # [28]
+        features.append(progress)  # [29]
 
         # [28-32] Current state
         # Avg spot price across running instances
@@ -1005,6 +1044,7 @@ class SpotOrchestratorEnv(gym.Env):
             "completed_jobs": self.completed_jobs,
             "failed_jobs": self.failed_jobs,
             "sla_compliance": self._calculate_sla(),
+            "spot_launch_failed": self.step_spot_launch_failed,
             "type_distribution": type_dist,
             "az_distribution": az_dist,
         }
@@ -1030,8 +1070,9 @@ class SpotOrchestratorEnv(gym.Env):
         needed = max(self.running_jobs + self.pending_jobs, 0)
 
         # Capacity guard: block PROVISION when we already have 1.5× headroom
-        capacity_saturated = (total_cap >= needed * 1.5 and needed > 0) or \
-                             (total_instances >= 3 and needed == 0)
+        # Never block when fleet is empty (allow bootstrap provisioning)
+        capacity_saturated = (total_cap >= needed * 1.5 and needed > 0 and total_instances > 0) or \
+                             (total_instances >= 3 and needed == 0 and total_instances > 0)
 
         # RESERVE_CAPACITY global justification
         avg_interrupt = float(np.mean([
