@@ -110,8 +110,12 @@ class SpotOrchestratorEnv(gym.Env):
         self.sla_penalty_coeff = rc.get('sla_penalty', 1.0)
         self.interrupt_penalty_coeff = rc.get('interrupt_penalty', 0.1)
         self.convert_to_od_penalty_coeff   = rc.get('convert_to_od_penalty',   0.4)
-        self.convert_to_spot_penalty_coeff = rc.get('convert_to_spot_penalty', 0.3)
+        # v26: tăng penalty path OD→Convert để agent thích PROVISION_SPOT thẳng hơn
+        self.convert_to_spot_penalty_coeff = rc.get('convert_to_spot_penalty', 0.5)
         self.rebalance_penalty_coeff       = rc.get('rebalance_penalty',       0.8)
+        # v26: thưởng khi PROVISION_SPOT thành công — bù đắp rủi ro SPS-gated
+        # 0.4/success: đủ mạnh để agent thấy PROVISION_SPOT > OD→Convert về reward
+        self.provision_spot_bonus_coeff    = rc.get('provision_spot_bonus',    0.4)
         if 'migration_penalty' in rc:
             mp = rc['migration_penalty']
             self.convert_to_od_penalty_coeff   = rc.get('convert_to_od_penalty',   mp)
@@ -127,6 +131,9 @@ class SpotOrchestratorEnv(gym.Env):
         # Phạt 0.03 mỗi instance mỗi step → fleet 10 inst × 168 steps = 50.4 reward loss/ep
         # Đủ mạnh để agent học shrink, không quá mạnh để vẫn giữ instance khi cần.
         self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.03)
+        # v25-fix: idle fleet penalty — phạt khi giữ fleet trong khi không có job.
+        # v25b: giảm 0.15→0.05 để tránh agent release quá hung hăng gây miss SLA khi job burst.
+        self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.05)
         # Cooldown: số steps mỗi pool bị locked sau PROVISION/CONVERT/REBALANCE
         # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh
         self.cooldown_steps = rc.get('cooldown_steps', 2)
@@ -175,6 +182,7 @@ class SpotOrchestratorEnv(gym.Env):
         self.step_interruptions = 0
         self.step_wasted_action = False
         self.step_migrate_to_spot = False   # for migrate-back bonus
+        self.step_provision_spot_success = 0  # v26: đếm PROVISION_SPOT thành công
 
         # Idle streak: số steps liên tiếp mà pending=0 và running=0
         self.idle_streak = 0
@@ -245,6 +253,7 @@ class SpotOrchestratorEnv(gym.Env):
         self.step_rebalance = 0
         self.step_interruptions = 0
         self.step_spot_launch_failed = False
+        self.step_provision_spot_success = 0
 
         # 1. Execute action
         self._execute_action(action)
@@ -307,6 +316,7 @@ class SpotOrchestratorEnv(gym.Env):
                 launch_prob = 0.05 + 0.90 * sps  # map [0,1] → [5%, 95%]
                 if self.np_random.random() < launch_prob:
                     pool.spot_count += 1
+                    self.step_provision_spot_success += 1  # v26: đếm để thưởng
                 else:
                     # Launch failed: AWS từ chối request do thiếu capacity
                     self.step_wasted_action = True
@@ -606,7 +616,9 @@ class SpotOrchestratorEnv(gym.Env):
         # Workload-required vCPUs: pending + running jobs (mỗi job ~1 vCPU slot)
         required_vcpu = self.pending_jobs + self.running_jobs
         # Quy đổi sang số instance "tham chiếu" theo m5.large (2 vCPU)
-        required_instances = max(1, required_vcpu / 2.0)
+        # v25-fix: max(0,...) thay vì max(1,...) — khi không có job thì baseline=0,
+        # tránh agent thấy savings giả khi provision lúc idle.
+        required_instances = max(0, required_vcpu / 2.0)
         baseline_od_cost = required_instances * avg_od
 
         # Accumulate for state feature [33] budget_spent_ratio
@@ -663,6 +675,19 @@ class SpotOrchestratorEnv(gym.Env):
         total_instances = sum(p.spot_count + p.ondemand_count for p in self.pools.values())
         fleet_size_penalty = total_instances * self.fleet_size_penalty_coeff
 
+        # ═══ 8. IDLE FLEET PENALTY — v25-fix ═══
+        # Phạt mạnh khi giữ fleet mà không có job nào (pending=0, running=0).
+        # Buộc agent học RELEASE khi idle thay vì cứ giữ instances chờ.
+        idle_fleet_penalty = 0.0
+        if self.pending_jobs == 0 and self.running_jobs == 0 and total_instances > 0:
+            idle_fleet_penalty = total_instances * self.idle_fleet_penalty_coeff
+
+        # ═══ 9. PROVISION SPOT BONUS — v26-fix ═══
+        # Thưởng khi PROVISION_SPOT thành công để agent ưu tiên path này
+        # thay vì path OD→CONVERT_TO_SPOT (tốn 2 steps + convert_penalty).
+        # 0.4/success: PROVISION_SPOT(+0.4) > PROVISION_OD(0) + CONVERT(-0.5) = -0.5
+        provision_spot_bonus = self.step_provision_spot_success * self.provision_spot_bonus_coeff
+
         reward = (
             savings
             - sla_penalty
@@ -671,6 +696,8 @@ class SpotOrchestratorEnv(gym.Env):
             - concentration_penalty
             - overprovision_penalty
             - fleet_size_penalty
+            - idle_fleet_penalty
+            + provision_spot_bonus
         )
         return float(reward)
 
@@ -1066,6 +1093,8 @@ class SpotOrchestratorEnv(gym.Env):
         """
         mask = np.ones(N_ACTIONS, dtype=bool)
         total_instances = self._total_instances()
+        total_spot_global = sum(p.spot_count for p in self.pools.values())
+        total_od_global   = sum(p.ondemand_count for p in self.pools.values())
         total_cap = max(self._total_vcpu(), 1)
         needed = max(self.running_jobs + self.pending_jobs, 0)
 
@@ -1073,6 +1102,10 @@ class SpotOrchestratorEnv(gym.Env):
         # Never block when fleet is empty (allow bootstrap provisioning)
         capacity_saturated = (total_cap >= needed * 1.5 and needed > 0 and total_instances > 0) or \
                              (total_instances >= 3 and needed == 0 and total_instances > 0)
+
+        # v27: pre-compute utilization ratio (same as in _execute_action) for mask sync
+        total_vcpu_for_mask = max(self._total_vcpu(), 1)
+        util_ratio = self.running_jobs / total_vcpu_for_mask
 
         # RESERVE_CAPACITY global justification
         avg_interrupt = float(np.mean([
@@ -1098,8 +1131,13 @@ class SpotOrchestratorEnv(gym.Env):
                 pool_interrupt = self.market_sim.get_pool_interrupt_prob(t, az)
 
                 # PROVISION ops — block khi pool full hoặc capacity đã dư
-                if pool_full or capacity_saturated:
+                # v27: PROVISION_SPOT không bị block bởi capacity_saturated —
+                # agent cần được phép thêm spot để thay thế OD (cùng workload, rẻ hơn).
+                # Block idle_streak >= 3 (đồng bộ với execute: không provision khi không có job)
+                idle_no_jobs = self.idle_streak >= 3
+                if pool_full or idle_no_jobs:
                     mask[encode_action(Operation.PROVISION_SPOT, t, az)] = False
+                if pool_full or capacity_saturated or idle_no_jobs:
                     mask[encode_action(Operation.PROVISION_ONDEMAND, t, az)] = False
 
                 # RELEASE ops — cần count > 0
@@ -1108,16 +1146,28 @@ class SpotOrchestratorEnv(gym.Env):
                 if pool.ondemand_count == 0:
                     mask[encode_action(Operation.RELEASE_ONDEMAND, t, az)] = False
 
+                # v26-fix: block RELEASE khi sau khi release sẽ không đủ vCPU cho job hiện tại
+                # capacity_after = total_cap - vcpu_per_inst (1 inst sẽ bị release)
+                # block nếu capacity_after < running_jobs (đang chạy job)
+                vcpu_per_inst = INSTANCE_TYPES[t].vcpus
+                capacity_after_release = total_cap - vcpu_per_inst
+                if capacity_after_release < self.running_jobs:
+                    mask[encode_action(Operation.RELEASE_SPOT, t, az)] = False
+                    mask[encode_action(Operation.RELEASE_ONDEMAND, t, az)] = False
+
                 # CONVERT_TO_ONDEMAND — cần có spot ở pool
                 if pool.spot_count == 0:
                     mask[encode_action(Operation.CONVERT_TO_ONDEMAND, t, az)] = False
 
                 # CONVERT_TO_SPOT — cần có OD + spot rẻ hơn OD
-                if pool.ondemand_count == 0 or spot_price >= od_price:
+                # v27: đồng bộ với execute: block khi util > 0.8 AND pending > 0 (unsafe at peak)
+                c2spot_unsafe_peak = (util_ratio > 0.8 and self.pending_jobs > 0)
+                if pool.ondemand_count == 0 or spot_price >= od_price or c2spot_unsafe_peak:
                     mask[encode_action(Operation.CONVERT_TO_SPOT, t, az)] = False
 
-                # REBALANCE_SPOT — target pool phải còn slot
-                if pool_full:
+                # REBALANCE_SPOT — target pool phải còn slot VÀ phải có spot để di chuyển
+                # v26-fix: block khi toàn bộ fleet không có spot nào (không có gì để rebalance)
+                if pool_full or total_spot_global == 0:
                     mask[encode_action(Operation.REBALANCE_SPOT, t, az)] = False
 
                 # COOLDOWN — block all pool-targeted ops while cooldown active

@@ -2,6 +2,8 @@
 
 **Dạy một AI agent biết khi nào nên mua AWS Spot, khi nào mua On-Demand, dùng instance type nào và đặt ở Availability Zone nào — để chi phí thấp nhất mà vẫn hoàn thành công việc đúng hạn.**
 
+Model sau khi train được export sang ONNX và triển khai qua [spot-rl-controller](https://github.com/RibunLoc/NT549.Q21_spot-rl-controller) — Go controller thực thi các action quản lý EC2 Spot/On-Demand theo thời gian thực.
+
 ---
 
 ## 1. Bài toán
