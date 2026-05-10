@@ -25,8 +25,12 @@ pipeline {
                 echo "Agent: ${NODE_NAME}"
                 sh '''
                     python3 --version
-                    pip install --quiet -r requirements-train.txt
                     mkdir -p results/kaggle results/models
+
+                    # Ubuntu 22.04+ không cho pip vào system Python
+                    # Dùng virtualenv trong workspace
+                    python3 -m venv .venv
+                    .venv/bin/pip install --quiet -r requirements-train.txt
                 '''
             }
         }
@@ -35,7 +39,7 @@ pipeline {
         stage('Env Check') {
             steps {
                 sh '''
-                    python3 -c "
+                    .venv/bin/python3 -c "
 import sys
 sys.path.insert(0, '.')
 from envs.spot_orchestrator_env import SpotOrchestratorEnv
@@ -53,7 +57,7 @@ print(f'OK: obs_dim={len(obs)} n_actions={N_ACTIONS}')
             steps {
                 echo "Training ${DEMO_EPISODES} episodes on ${NODE_NAME}..."
                 sh '''
-                    python3 -c "
+                    .venv/bin/python3 -c "
 import sys, os, torch
 sys.path.insert(0, '.')
 from envs.spot_orchestrator_env import SpotOrchestratorEnv
@@ -97,7 +101,7 @@ print(f'Model saved: {os.environ[\"MODEL_OUT\"]}')
         stage('Export ONNX') {
             steps {
                 sh '''
-                    python3 scripts/export_model.py \
+                    .venv/bin/python3 scripts/export_model.py \
                         --model  "$MODEL_OUT" \
                         --output "$ONNX_OUT"
                     echo "ONNX exported: $ONNX_OUT"
@@ -110,7 +114,7 @@ print(f'Model saved: {os.environ[\"MODEL_OUT\"]}')
         stage('Validate ONNX') {
             steps {
                 sh '''
-                    python3 -c "
+                    .venv/bin/python3 -c "
 import onnxruntime as ort
 import numpy as np, os, sys
 sys.path.insert(0, '.')
@@ -145,7 +149,7 @@ Deploy ONNX lên controller:
             echo "Build ${BUILD_NUMBER} FAILED on agent ${NODE_NAME}"
         }
         always {
-            cleanWs(patterns: [[pattern: 'venv/**', type: 'INCLUDE']])
+            cleanWs(patterns: [[pattern: '.venv/**', type: 'INCLUDE']])
         }
     }
 }
