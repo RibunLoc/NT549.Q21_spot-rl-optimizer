@@ -123,8 +123,10 @@ class WorkloadGenerator:
         Returns:
             Arrival rate (jobs/step)
         """
-        hour_of_day = self.current_timestep % 24
-        day_of_week = (self.current_timestep // 24) % 7  # 0=Mon ... 6=Sun
+        # 1 step = 15 min → 4 steps = 1 hour, 96 steps = 1 day
+        # Đồng bộ với env state feature [27-28]: hour = step//4 % 24, day = step//96 % 7
+        hour_of_day = (self.current_timestep // 4) % 24
+        day_of_week = (self.current_timestep // (4 * 24)) % 7  # 0=Mon ... 6=Sun
 
         # Base rate × hourly profile (smooth transitions)
         rate = self.base_arrival_rate * self.hourly_profile[hour_of_day]
@@ -218,8 +220,8 @@ class WorkloadGenerator:
         total_expected = 0.0
         for dt in range(1, horizon + 1):
             future_step = self.current_timestep + dt
-            hour = future_step % 24
-            day = (future_step // 24) % 7
+            hour = (future_step // 4) % 24
+            day = (future_step // (4 * 24)) % 7
 
             rate = self.base_arrival_rate * self.hourly_profile[hour]
             if day >= 5:
