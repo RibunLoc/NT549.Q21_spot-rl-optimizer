@@ -1,0 +1,6 @@
+outs:
+- md5: 92715750c4e33ff9c80e768436fa2dce.dir
+  size: 157654683
+  nfiles: 4
+  hash: md5
+  path: spot_prices
