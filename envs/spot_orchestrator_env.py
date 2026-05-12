@@ -134,6 +134,14 @@ class SpotOrchestratorEnv(gym.Env):
         # v25-fix: idle fleet penalty — phạt khi giữ fleet trong khi không có job.
         # v25b: giảm 0.15→0.05 để tránh agent release quá hung hăng gây miss SLA khi job burst.
         self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.05)
+        # v34: empty fleet penalty — phạt khi pending>0 mà fleet=0.
+        # Capped: không scale theo pending để tránh Q-value diverge khi queue lớn.
+        # fleet=0 + any pending → -coeff/step (fixed signal, không phụ thuộc queue size).
+        self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.3)
+        # v30: SLA shaping bonus — thưởng mỗi step khi SLA window đang tốt
+        # Giải quyết delayed credit: không chỉ phạt vi phạm mà còn thưởng duy trì
+        self.sla_bonus_coeff      = rc.get('sla_bonus', 0.0)
+        self.sla_bonus_threshold  = rc.get('sla_bonus_threshold', 0.95)
         # Cooldown: số steps mỗi pool bị locked sau PROVISION/CONVERT/REBALANCE
         # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh
         self.cooldown_steps = rc.get('cooldown_steps', 2)
@@ -682,11 +690,30 @@ class SpotOrchestratorEnv(gym.Env):
         if self.pending_jobs == 0 and self.running_jobs == 0 and total_instances > 0:
             idle_fleet_penalty = total_instances * self.idle_fleet_penalty_coeff
 
+        # ═══ 8b. EMPTY FLEET PENALTY — v34 ═══
+        # Phạt cố định khi fleet=0 và có pending jobs.
+        # Không scale theo pending: tránh reward magnitude explode khi queue lớn.
+        empty_fleet_penalty = 0.0
+        if total_instances == 0 and self.pending_jobs > 0:
+            empty_fleet_penalty = self.empty_fleet_penalty_coeff
+
         # ═══ 9. PROVISION SPOT BONUS — v26-fix ═══
-        # Thưởng khi PROVISION_SPOT thành công để agent ưu tiên path này
-        # thay vì path OD→CONVERT_TO_SPOT (tốn 2 steps + convert_penalty).
-        # 0.4/success: PROVISION_SPOT(+0.4) > PROVISION_OD(0) + CONVERT(-0.5) = -0.5
         provision_spot_bonus = self.step_provision_spot_success * self.provision_spot_bonus_coeff
+
+        # ═══ 10. SLA SHAPING BONUS — v30 ═══
+        # Thưởng mỗi step khi SLA window hiện tại ≥ threshold (default 95%).
+        # Giải quyết delayed credit: tín hiệu dương liên tục khi duy trì SLA tốt.
+        sla_bonus = 0.0
+        if self.sla_bonus_coeff > 0:
+            if self.sla_window:
+                total_c = sum(c for c, f in self.sla_window)
+                total_f = sum(f for c, f in self.sla_window)
+                total   = total_c + total_f
+                current_sla = total_c / total if total > 0 else 1.0
+            else:
+                current_sla = 1.0
+            if current_sla >= self.sla_bonus_threshold:
+                sla_bonus = self.sla_bonus_coeff
 
         reward = (
             savings
@@ -697,7 +724,9 @@ class SpotOrchestratorEnv(gym.Env):
             - overprovision_penalty
             - fleet_size_penalty
             - idle_fleet_penalty
+            - empty_fleet_penalty
             + provision_spot_bonus
+            + sla_bonus
         )
         return float(reward)
 

@@ -145,9 +145,15 @@ class PrioritizedReplayBuffer:
     def sample(self, batch_size: int) -> tuple:
         """Sample batch proportional to priority, with IS weights."""
         n = len(self.buffer)
-        priorities = self.priorities[:n]
+        priorities = self.priorities[:n].copy()
+        # Guard: replace NaN/inf/zero với min positive để tránh probs.sum()==0
+        priorities = np.where(np.isfinite(priorities) & (priorities > 0), priorities, 1e-6)
         probs = priorities ** self.alpha
-        probs /= probs.sum()
+        total = probs.sum()
+        if total <= 0 or not np.isfinite(total):
+            probs = np.ones(n, dtype=np.float64) / n
+        else:
+            probs /= total
 
         indices = self.rng.choice(n, size=batch_size, replace=False, p=probs)
 

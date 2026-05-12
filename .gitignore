@@ -36,8 +36,7 @@ ENV/
 # VSCode
 .vscode/
 
-# Data files
-data/raw/
+# Data files — raw/processed tracked by DVC, not git
 data/processed/*.pkl
 data/processed/*.parquet
 
@@ -77,8 +76,7 @@ Thumbs.db
 *.swp
 *~
 
-# Large files
-*.csv
+# Large files — CSVs tracked by DVC
 !data/raw/.gitkeep
 !data/processed/.gitkeep
 .claude
