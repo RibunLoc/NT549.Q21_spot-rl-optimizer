@@ -168,6 +168,7 @@ class DQNAgent:
         reward: float,
         next_state: np.ndarray,
         done: bool,
+        next_action_mask: np.ndarray = None,
     ):
         """
         Store transition in replay buffer.
@@ -179,7 +180,7 @@ class DQNAgent:
             next_state: Next state
             done: Whether episode ended
         """
-        self.replay_buffer.add(state, action, reward, next_state, done)
+        self.replay_buffer.add(state, action, reward, next_state, done, next_action_mask)
 
     def train_step(self) -> Optional[float]:
         """
@@ -198,13 +199,20 @@ class DQNAgent:
         self.q_network.train()
 
         # Sample batch — PER trả thêm indices và IS weights
+        next_action_masks = None
         if self.use_per:
-            states, actions, rewards, next_states, dones, indices, is_weights = \
-                self.replay_buffer.sample(self.batch_size)
+            sample = self.replay_buffer.sample(self.batch_size)
+            if len(sample) == 8:
+                states, actions, rewards, next_states, dones, next_action_masks, indices, is_weights = sample
+            else:
+                states, actions, rewards, next_states, dones, indices, is_weights = sample
             is_weights_tensor = torch.FloatTensor(is_weights).to(self.device)
         else:
-            states, actions, rewards, next_states, dones = \
-                self.replay_buffer.sample(self.batch_size)
+            sample = self.replay_buffer.sample(self.batch_size)
+            if len(sample) == 6:
+                states, actions, rewards, next_states, dones, next_action_masks = sample
+            else:
+                states, actions, rewards, next_states, dones = sample
             is_weights_tensor = None
 
         # Convert to tensors
@@ -213,6 +221,8 @@ class DQNAgent:
         rewards     = torch.FloatTensor(rewards).to(self.device)
         next_states = torch.FloatTensor(next_states).to(self.device)
         dones       = torch.FloatTensor(dones).to(self.device)
+        if next_action_masks is not None:
+            next_action_masks = torch.BoolTensor(next_action_masks).to(self.device)
 
         # Current Q-values: Q(s, a) từ online network
         current_q_values = self.q_network(states).gather(1, actions.unsqueeze(1)).squeeze(1)
@@ -222,7 +232,10 @@ class DQNAgent:
         # 2. Target net đánh giá: Q_target(s', a*)
         with torch.no_grad():
             # Bước 1: online net chọn action tốt nhất ở next_state
-            next_actions = self.q_network(next_states).argmax(dim=1)
+            next_online_q = self.q_network(next_states)
+            if next_action_masks is not None:
+                next_online_q = next_online_q.masked_fill(~next_action_masks, float('-inf'))
+            next_actions = next_online_q.argmax(dim=1)
             # Bước 2: target net đánh giá Q-value của action đó
             next_q_values = self.target_network(next_states).gather(
                 1, next_actions.unsqueeze(1)

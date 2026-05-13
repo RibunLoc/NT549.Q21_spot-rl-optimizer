@@ -78,7 +78,8 @@ def evaluate(env, agent, num_episodes: int = 10) -> dict:
         ep_reward = 0.0
 
         while True:
-            action = agent.select_action(state, training=False)
+            action_mask = env.get_action_mask() if hasattr(env, "get_action_mask") else None
+            action = agent.select_action(state, training=False, action_mask=action_mask)
             next_state, reward, terminated, truncated, info = env.step(action)
             ep_reward += reward
             state = next_state
@@ -213,13 +214,19 @@ def train(config: dict, experiment_name: str,
 
         for step in range(max_steps_per_episode):
             # Select action
-            action = agent.select_action(state, training=True)
+            action_mask = env.get_action_mask() if hasattr(env, "get_action_mask") else None
+            action = agent.select_action(state, training=True, action_mask=action_mask)
 
             # Step environment
             next_state, reward, terminated, truncated, info = env.step(action)
+            next_action_mask = env.get_action_mask() if hasattr(env, "get_action_mask") else None
 
             # Store transition
-            agent.store_transition(state, action, reward, next_state, terminated or truncated)
+            agent.store_transition(
+                state, action, reward, next_state,
+                terminated or truncated,
+                next_action_mask=next_action_mask,
+            )
 
             # Train agent
             loss = agent.train_step()

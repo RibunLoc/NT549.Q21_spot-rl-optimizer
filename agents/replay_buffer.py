@@ -10,7 +10,7 @@ class ReplayBuffer:
     """
     Fixed-size buffer to store experience tuples.
 
-    Stores (state, action, reward, next_state, done) transitions.
+    Stores (state, action, reward, next_state, done, next_action_mask) transitions.
     """
 
     def __init__(self, capacity: int):
@@ -31,6 +31,7 @@ class ReplayBuffer:
         reward: float,
         next_state: np.ndarray,
         done: bool,
+        next_action_mask: np.ndarray = None,
     ):
         """
         Add experience to buffer.
@@ -42,7 +43,8 @@ class ReplayBuffer:
             next_state: Next state
             done: Whether episode ended
         """
-        self.buffer.append((state, action, reward, next_state, done))
+        mask = None if next_action_mask is None else np.asarray(next_action_mask, dtype=bool)
+        self.buffer.append((state, action, reward, next_state, done, mask))
 
     def sample(self, batch_size: int) -> tuple:
         """
@@ -63,6 +65,11 @@ class ReplayBuffer:
         rewards = np.array([exp[2] for exp in batch])
         next_states = np.array([exp[3] for exp in batch])
         dones = np.array([exp[4] for exp in batch], dtype=np.float32)
+        masks = [exp[5] if len(exp) > 5 else None for exp in batch]
+
+        if all(m is not None for m in masks):
+            next_action_masks = np.array(masks, dtype=bool)
+            return states, actions, rewards, next_states, dones, next_action_masks
 
         return states, actions, rewards, next_states, dones
 
@@ -119,6 +126,7 @@ class PrioritizedReplayBuffer:
         reward: float,
         next_state: np.ndarray,
         done: bool,
+        next_action_mask: np.ndarray = None,
     ):
         """Add experience with a moderately high priority.
 
@@ -134,10 +142,13 @@ class PrioritizedReplayBuffer:
         else:
             init_priority = 1.0
 
+        mask = None if next_action_mask is None else np.asarray(next_action_mask, dtype=bool)
+        transition = (state, action, reward, next_state, done, mask)
+
         if len(self.buffer) < self.capacity:
-            self.buffer.append((state, action, reward, next_state, done))
+            self.buffer.append(transition)
         else:
-            self.buffer[self.pos] = (state, action, reward, next_state, done)
+            self.buffer[self.pos] = transition
 
         self.priorities[self.pos] = init_priority
         self.pos = (self.pos + 1) % self.capacity
@@ -169,6 +180,14 @@ class PrioritizedReplayBuffer:
         rewards     = np.array([e[2] for e in batch], dtype=np.float32)
         next_states = np.array([e[3] for e in batch], dtype=np.float32)
         dones       = np.array([e[4] for e in batch], dtype=np.float32)
+        masks       = [e[5] if len(e) > 5 else None for e in batch]
+
+        if all(m is not None for m in masks):
+            next_action_masks = np.array(masks, dtype=bool)
+            return (
+                states, actions, rewards, next_states, dones,
+                next_action_masks, indices, weights.astype(np.float32),
+            )
 
         return states, actions, rewards, next_states, dones, indices, weights.astype(np.float32)
 
