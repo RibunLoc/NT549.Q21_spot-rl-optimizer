@@ -20,6 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 MANIFEST
+*.csv
 
 # Virtual environments
 venv/
@@ -29,7 +30,7 @@ ENV/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-
+runpod_train.ipynb
 # PyCharm
 .idea/
 

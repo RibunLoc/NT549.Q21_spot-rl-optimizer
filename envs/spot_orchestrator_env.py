@@ -106,16 +106,16 @@ class SpotOrchestratorEnv(gym.Env):
         # Reward config — rescale xuống cùng magnitude với savings ($0.1-2/step)
         # để gradient không bị SLA penalty dominate.
         rc = reward_config or {}
-        # v13-fix: giảm sla 2.0 -> 1.0 để cân bằng với savings (max ~$1.3/step)
-        self.sla_penalty_coeff = rc.get('sla_penalty', 1.0)
+        # v35: tăng sla_penalty 2.0→3.5 để counter slow policy degradation (SLA drift ~0.88)
+        # v34 dùng 2.0 quá nhẹ: agent học tiết kiệm cost > duy trì SLA qua 5000 ep
+        self.sla_penalty_coeff = rc.get('sla_penalty', 3.5)
         self.interrupt_penalty_coeff = rc.get('interrupt_penalty', 0.1)
         self.convert_to_od_penalty_coeff   = rc.get('convert_to_od_penalty',   0.4)
         # v26: tăng penalty path OD→Convert để agent thích PROVISION_SPOT thẳng hơn
         self.convert_to_spot_penalty_coeff = rc.get('convert_to_spot_penalty', 0.5)
         self.rebalance_penalty_coeff       = rc.get('rebalance_penalty',       0.8)
-        # v26: thưởng khi PROVISION_SPOT thành công — bù đắp rủi ro SPS-gated
-        # 0.4/success: đủ mạnh để agent thấy PROVISION_SPOT > OD→Convert về reward
-        self.provision_spot_bonus_coeff    = rc.get('provision_spot_bonus',    0.4)
+        # v35: tăng provision_spot_bonus 0.4→0.8 để incentive agent maintain fleet buffer
+        self.provision_spot_bonus_coeff    = rc.get('provision_spot_bonus',    0.8)
         if 'migration_penalty' in rc:
             mp = rc['migration_penalty']
             self.convert_to_od_penalty_coeff   = rc.get('convert_to_od_penalty',   mp)
@@ -131,17 +131,17 @@ class SpotOrchestratorEnv(gym.Env):
         # Phạt 0.03 mỗi instance mỗi step → fleet 10 inst × 168 steps = 50.4 reward loss/ep
         # Đủ mạnh để agent học shrink, không quá mạnh để vẫn giữ instance khi cần.
         self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.03)
-        # v25-fix: idle fleet penalty — phạt khi giữ fleet trong khi không có job.
-        # v25b: giảm 0.15→0.05 để tránh agent release quá hung hăng gây miss SLA khi job burst.
-        self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.05)
+        # v35: giảm idle_fleet_penalty 0.05→0.02 để agent không sợ giữ buffer fleet
+        # v34 dùng 0.05: agent release quá sớm → fleet=0 khi job burst → miss SLA
+        self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.02)
         # v34: empty fleet penalty — phạt khi pending>0 mà fleet=0.
         # Capped: không scale theo pending để tránh Q-value diverge khi queue lớn.
         # fleet=0 + any pending → -coeff/step (fixed signal, không phụ thuộc queue size).
-        self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.3)
+        self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.5)
         # v30: SLA shaping bonus — thưởng mỗi step khi SLA window đang tốt
-        # Giải quyết delayed credit: không chỉ phạt vi phạm mà còn thưởng duy trì
-        self.sla_bonus_coeff      = rc.get('sla_bonus', 0.0)
-        self.sla_bonus_threshold  = rc.get('sla_bonus_threshold', 0.95)
+        # v35: threshold 0.95→0.93 để agent dễ đạt bonus hơn (encourage maintain SLA)
+        self.sla_bonus_coeff      = rc.get('sla_bonus', 0.5)
+        self.sla_bonus_threshold  = rc.get('sla_bonus_threshold', 0.93)
         # Cooldown: số steps mỗi pool bị locked sau PROVISION/CONVERT/REBALANCE
         # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh
         self.cooldown_steps = rc.get('cooldown_steps', 2)
