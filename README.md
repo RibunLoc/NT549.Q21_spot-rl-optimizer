@@ -37,9 +37,9 @@ Agent học bằng **thử-sai hàng nghìn episode** trong simulator, dần d�
 
 RL chạy trên Markov Decision Process: (State, Action, Reward, Transition).
 
-### State: 90 chiều số
+### State: 92 chiều số
 
-Mỗi bước agent nhận vector `s ∈ ℝ⁹⁰`, tất cả normalize về [0, 1]:
+Mỗi bước agent nhận vector `s ∈ ℝ⁹²`, tất cả normalize về [0, 1]:
 
 | Nhóm | Chiều | Nội dung |
 |---|---|---|
@@ -47,7 +47,7 @@ Mỗi bước agent nhận vector `s ∈ ℝ⁹⁰`, tất cả normalize về [
 | Multi-AZ aggregated | 3 | az_price_spread, cheapest_az_id, az_concentration |
 | Multi-Type aggregated | 3 | best_type_rank, worst_interrupt_rank, best_vcpu_ratio |
 | Infrastructure | 3 | num_spot, num_ondemand, total_vcpu |
-| Workload | 4 | pending_jobs, running_jobs, forecast_1h, queue_wait |
+| Workload | 6 | pending_jobs, running_jobs, forecast, queue_wait, avg_cpu_demand, avg_ram_demand |
 | Time | 3 | hour_of_day, day_of_week, episode_progress |
 | Current metrics | 5 | avg_spot_price, avg_interrupt, spot_ratio, cost_rate, sla_health |
 | Extended context | 9 | budget_used, idle_ratio, price_trend, interrupt_streak, ... |
@@ -98,8 +98,7 @@ Sau mỗi action, simulator:
 5. Tick 15 phút, tính cost & SLA
 6. Trả về `(next_state, reward, done, info)`
 
-**1 episode = 168 steps = 1 tuần mô phỏng (15 phút/step).  
-5000 episodes ≈ 840K quyết định.**
+Notebook training hiện dùng **168 steps/episode**. Với giả định điều khiển mỗi 15 phút, cửa sổ này tương đương 42 giờ; nếu cần mô phỏng đủ 1 tuần ở 15 phút/step thì dùng 672 steps.
 
 ---
 
@@ -112,7 +111,7 @@ DQN vanilla học `Q(s, a)` với 121 output neurons độc lập. Khi thấy m�
 ### Factored DQN: tách op × pool
 
 ```
-              State (90-dim)
+              State (92-dim)
                    │
             Trunk [512 → 256]          # feature extractor chung
                    │
@@ -126,7 +125,7 @@ DQN vanilla học `Q(s, a)` với 121 output neurons độc lập. Khi thấy m�
    Q(s, HOLD)   = hold_score
 ```
 
-→ **24 output neurons** thay vì 121. Chia sẻ kiến thức giữa các op/pool, học nhanh hơn và generalize tốt hơn. **~236K params** tổng.
+→ Head nội bộ chỉ học **24 advantage scores** (8 op + 15 pool + HOLD) rồi flatten ra Q-values `[121]` để tương thích DQN. Chia sẻ kiến thức giữa các op/pool, học nhanh hơn và generalize tốt hơn. **~246K params** với `hidden_dim=512`.
 
 ### Kỹ thuật bổ sung
 
@@ -218,13 +217,13 @@ pack_kaggle.ps1                 kaggle_train.ipynb
   ├─ agents/                      ├─ Cell 2: unzip dataset
   ├─ data/processed/*.csv         ├─ Cell 3: verify imports
   └─ → spot_rl_kaggle.zip         ├─ Cell 4: check GPU
-       │ upload                   ├─ Cell 5: init env + agent (v20)
+       │ upload                   ├─ Cell 5: init env + agent (v36)
        ▼                          ├─ Cell 6: MLflow setup
   Kaggle Dataset                  ├─ Cell 7: load checkpoint (auto-detect)
   "spot-rl-code"                  └─ Cell 8: training loop
                                        │
                                        ▼ download
-                               results/kaggle/best_mixed_v20.pth
+                               results/kaggle/best_mixed_v36.pth
 ```
 
 **Kaggle Secrets cần cấu hình:**
@@ -237,13 +236,13 @@ AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  # S3 artifact store
 
 ---
 
-## 8. Kết quả (v20)
+## 8. Kết quả
 
-Model **v20** train 5000+ episodes với `sla_penalty=3.5` và soft model scoring:
+Các checkpoint tốt nhất được train trên Kaggle/RunPod với `MixedScenarioEnv`, Factored Dueling DQN, action masking và soft model scoring:
 
 | Agent | Cost/ep | SLA | Savings vs OD |
 |---|---|---|---|
-| **DQN v20 (best)** | **~$345** | **~95%** | **~40%** |
+| **DQN generalist (best)** | **~$345** | **~95%** | **~40%** |
 | On-Demand pure | ~$575 | 96%+ | 0% |
 | Spot pure | ~$148 | 85-92% | 75% (fail SLA) |
 | Threshold | ~$155 | 90-91% | 73% (fail SLA) |
@@ -251,7 +250,7 @@ Model **v20** train 5000+ episodes với `sla_penalty=3.5` và soft model scorin
 
 **Key insight:** Spot/Threshold rẻ hơn DQN nhưng không đạt SLA ≥ 95%. DQN là baseline duy nhất vừa tiết kiệm vừa đảm bảo reliability.
 
-**Training history v20 (Kaggle T4, ~500 phút):**
+**Training history tham chiếu (Kaggle T4, ~500 phút):**
 - Reward: 0 → ~950 (converged)
 - Cost: ~$450 → ~$345
 - SLA: 83% → ~95% (cả 4 scenarios hội tụ sát ngưỡng)
@@ -265,7 +264,7 @@ spot-rl-optimiztion/
 │
 ├── agents/
 │   ├── dqn_agent.py              # DQN (Double + Dueling + PER + masking)
-│   ├── networks.py               # FactoredDuelingQNetwork (24 outputs)
+│   ├── networks.py               # FactoredDuelingQNetwork (op/pool/hold heads)
 │   ├── replay_buffer.py          # ReplayBuffer + PrioritizedReplayBuffer
 │   └── baselines.py              # 6 baselines để so sánh
 │
@@ -273,7 +272,7 @@ spot-rl-optimiztion/
 │   ├── spot_orchestrator_env.py  # env chính: 15 pools, 121 actions
 │   ├── mixed_scenario_env.py     # wrapper: sample scenario theo weights
 │   ├── action_schema.py          # encode/decode 121 actions
-│   ├── instance_catalog.py       # 5 types × 3 AZs, STATE_DIM=90
+│   ├── instance_catalog.py       # 5 types × 3 AZs, STATE_DIM=92
 │   ├── market_simulator.py       # mô phỏng giá spot + interrupt
 │   └── workload_generator.py     # sinh job (Poisson + daily profile)
 │
@@ -290,7 +289,7 @@ spot-rl-optimiztion/
 │   ├── kaggle_train.ipynb        # training notebook (Kaggle T4)
 │   └── data_analysis.ipynb       # kiểm tra chất lượng data trước khi train
 │
-├── results/kaggle/               # checkpoints (.pth) + history (.pkl)
+├── results/                      # checkpoints (.pth), reports, evaluation artifacts
 │
 ├── pack_kaggle.ps1               # đóng gói zip để upload Kaggle
 └── requirements.txt
@@ -306,7 +305,7 @@ Sau khi train xong, model được export sang ONNX và chạy bởi **spot-rl-c
 spot-rl-controller/
 ├── cmd/controller/main.go        # vòng lặp chính: collect → infer → guard → execute
 ├── cmd/sender/main.go            # gửi test jobs vào SQS
-├── pkg/types/types.go            # shared types (State 90-dim, Action 121)
+├── pkg/types/types.go            # shared types (State 92-dim, Action 121)
 ├── internal/
 │   ├── state/collector.go        # build state vector từ AWS APIs
 │   ├── inference/model.go        # ONNX Runtime wrapper (CGO)
@@ -323,7 +322,7 @@ spot-rl-controller/
 ```
 AWS EC2/SQS APIs
       ↓
-State Collector (90 features)
+State Collector (92 features)
       ↓
 ONNX Runtime → Q-values [121]
       ↓
@@ -338,21 +337,21 @@ EC2 Executor (provisioning / termination)
 
 ---
 
-## 11. Hyperparameters (v20)
+## 11. Hyperparameters (Kaggle v36)
 
 | Parameter | Giá trị | Ghi chú |
 |---|---|---|
-| STATE_DIM | 90 | 10 nhóm features |
+| STATE_DIM | 92 | 10 nhóm features |
 | ACTION_DIM | 121 | 8 ops × 15 pools + HOLD |
 | Hidden dim | 512 → 256 | Factored DQN trunk |
-| Learning rate | 1e-4 | Adam |
+| Learning rate | 3e-5 | AdamW |
 | Gamma | 0.99 | discount factor |
-| Epsilon | 1.0 → 0.05 | exponential decay, 150K steps |
-| Batch size | 256 | |
-| Replay buffer | 500K | PER α=0.6, β 0.4→1.0 |
-| Target update | 2000 steps | |
+| Epsilon | 1.0 → 0.05 | exponential decay, 800K steps |
+| Batch size | 512 | |
+| Replay buffer | 300K | PER α=0.6, β 0.4→1.0 |
+| Target update | 5000 grad steps | |
 | Episodes/session | ~4000-4500 | Kaggle 9h timeout |
-| Steps/episode | 168 | 1 tuần × 15 phút/step |
+| Steps/episode | 168 | training window hiện tại trong notebook |
 | SLA penalty | 3.5 | per failed job |
 | Model score | Soft: `-cost - 500×sla_deficit` | không hard-cliff tại 95% |
 
