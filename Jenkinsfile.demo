@@ -114,17 +114,20 @@ print(f'[task-${taskId}] found {count} primes in {n} numbers in {elapsed:.1f}s')
         // ── 4. Report ─────────────────────────────────────────────────────────
         stage('Report') {
             steps {
-                sh '''
-                    echo "=== Build ${BUILD_LABEL} completed ==="
-                    echo "Node        : ${NODE_NAME}"
-                    echo "Workload    : ${WORKLOAD_SIZE}"
-                    echo "Build time  : ${currentBuild.durationString}" 2>/dev/null || true
-                    echo ""
-                    echo "Controller metrics to check:"
-                    echo "  spot_rl_pending_jobs    — should have spiked during queue"
-                    echo "  spot_rl_running_jobs    — this job counted here"
-                    echo "  spot_rl_action_total    — should show PROVISION if pending was high"
-                '''
+                script {
+                    def duration = currentBuild.durationString ?: 'unknown'
+                    echo """
+=== Build ${env.BUILD_LABEL} completed ===
+Node        : ${env.NODE_NAME}
+Workload    : ${params.WORKLOAD_SIZE}
+Build time  : ${duration}
+
+Controller metrics to check:
+  spot_rl_pending_jobs   — should have spiked during queue
+  spot_rl_running_jobs   — this job counted here
+  spot_rl_action_total   — should show PROVISION if pending was high
+"""
+                }
             }
         }
     }
