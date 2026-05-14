@@ -26,6 +26,11 @@ pipeline {
             defaultValue: '120',
             description: 'Số giây mỗi task giả lập xử lý (mặc định 120s = 2 phút)'
         )
+        string(
+            name: 'BUILD_LABEL',
+            defaultValue: '',
+            description: 'Label phân biệt build (tự sinh từ trigger script) — tránh Jenkins deduplicate'
+        )
     }
 
     options {

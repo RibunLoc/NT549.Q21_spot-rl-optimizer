@@ -17,7 +17,7 @@ set -euo pipefail
 JENKINS_URL="${JENKINS_URL:-https://jenkins.holoc.id.vn}"
 JENKINS_USER="${JENKINS_USER:-hothanhloc}"
 JENKINS_TOKEN="${JENKINS_TOKEN:-}"
-JOB_NAME="${JOB_NAME:-spot-rl-demo}"   # tên job trên Jenkins
+JOB_NAME="${JOB_NAME:-Spot-rl-demo}"   # tên job trên Jenkins
 
 PHASE="${1:-baseline}"
 
@@ -25,25 +25,49 @@ PHASE="${1:-baseline}"
 trigger_build() {
     local size="${1:-small}"
     local sleep_s="${2:-120}"
+    # Thêm BUILD_LABEL unique để Jenkins không deduplicate các build cùng params
+    # Dùng $RANDOM (shell built-in, luôn có) + epoch seconds để đảm bảo unique
+    local label="wave-$(date +%s)-${RANDOM}"
 
-    curl -s -X POST \
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST \
         "${JENKINS_URL}/job/${JOB_NAME}/buildWithParameters" \
         --user "${JENKINS_USER}:${JENKINS_TOKEN}" \
+        -L \
         --data-urlencode "WORKLOAD_SIZE=${size}" \
         --data-urlencode "SLEEP_SECONDS=${sleep_s}" \
-        -o /dev/null -w "  → triggered build size=${size} sleep=${sleep_s}s (HTTP %{http_code})\n"
+        --data-urlencode "BUILD_LABEL=${label}")
+
+    if [ "$http_code" -eq 200 ] || [ "$http_code" -eq 201 ] || [ "$http_code" -eq 303 ]; then
+        echo "  → queued build size=${size} sleep=${sleep_s}s label=${label} (HTTP ${http_code})"
+    else
+        echo "  ✗ FAILED size=${size} (HTTP ${http_code}) — check JENKINS_TOKEN và job name '${JOB_NAME}'"
+    fi
 }
 
 queue_depth() {
-    curl -s \
-        "${JENKINS_URL}/queue/api/json?tree=items[blocked,buildable]" \
-        --user "${JENKINS_USER}:${JENKINS_TOKEN}" \
-        | python3 -c "
+    local response
+    response=$(curl -s -w "\n%{http_code}" \
+        "${JENKINS_URL}/queue/api/json?tree=items[id,blocked,buildable,why,task[name]]" \
+        --user "${JENKINS_USER}:${JENKINS_TOKEN}")
+    local http_code body
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | head -n -1)
+
+    if [ "$http_code" != "200" ]; then
+        echo "  Queue: cannot fetch (HTTP ${http_code}) — check JENKINS_TOKEN"
+        return
+    fi
+    echo "$body" | python3 -c "
 import json, sys
 d = json.load(sys.stdin)
 items = d.get('items', [])
-print(f'  Queue depth: {len(items)} items pending')
-"
+print(f'  Queue depth: {len(items)} item(s)')
+for it in items:
+    name = it.get('task', {}).get('name', '?')
+    why  = it.get('why', '')
+    print(f'    - {name}: {why}')
+" 2>/dev/null || echo "  Queue: parse error (response was not JSON)"
 }
 
 log() { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -66,7 +90,7 @@ case "$PHASE" in
     log "Triggering 6 medium builds..."
     for i in $(seq 1 6); do
         trigger_build "medium" "180"
-        sleep 1
+        sleep 8
     done
     log ""
     log "Done. Queue status:"
@@ -84,7 +108,7 @@ case "$PHASE" in
         log "Wave ${wave}/3 — triggering 3 builds..."
         for i in $(seq 1 3); do
             trigger_build "medium" "150"
-            sleep 2
+            sleep 8   # > Jenkins Quiet Period (default 5s) để tránh deduplicate
         done
         queue_depth
         if [ "$wave" -lt 3 ]; then
@@ -100,7 +124,7 @@ case "$PHASE" in
     log "Purpose: heavy workload, kiểm tra agent scale up"
     for i in $(seq 1 3); do
         trigger_build "large" "240"
-        sleep 2
+        sleep 8
     done
     queue_depth
     log "Kỳ vọng: agent provision 2-3 spot instances, cost tăng nhưng SLA maintained"

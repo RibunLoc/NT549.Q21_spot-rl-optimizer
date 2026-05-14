@@ -128,15 +128,14 @@ class SpotOrchestratorEnv(gym.Env):
         # Mỗi vCPU-instance idle bị phạt theo OD price/h → khuyến khích shrink fleet
         self.overprovision_penalty_coeff = rc.get('overprovision_penalty', 0.3)
         # v14-fix: per-step fleet size penalty
-        # Phạt 0.03 mỗi instance mỗi step → fleet 10 inst × 168 steps = 50.4 reward loss/ep
-        # Đủ mạnh để agent học shrink, không quá mạnh để vẫn giữ instance khi cần.
-        self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.03)
+        # v39: giảm 0.03→0.01 vì 0.03×672 = 20.16/ep áp đảo savings → agent over-release
+        # Đủ mạnh để chống bloat, không quá mạnh để bias toward RELEASE.
+        self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.01)
         # v35: giảm idle_fleet_penalty 0.05→0.02 để agent không sợ giữ buffer fleet
-        # v34 dùng 0.05: agent release quá sớm → fleet=0 khi job burst → miss SLA
         self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.02)
         # v34: empty fleet penalty — phạt khi pending>0 mà fleet=0.
-        # Capped: không scale theo pending để tránh Q-value diverge khi queue lớn.
-        # fleet=0 + any pending → -coeff/step (fixed signal, không phụ thuộc queue size).
+        # v39: scale theo pending (capped 10) để agent thấy queue càng dài càng tệ
+        # khi không có capacity. Tránh Q-diverge bằng cap 10 thay vì raw pending.
         self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.5)
         # v30: SLA shaping bonus — thưởng mỗi step khi SLA window đang tốt
         # v35: threshold 0.95→0.93 để agent dễ đạt bonus hơn (encourage maintain SLA)
@@ -551,8 +550,9 @@ class SpotOrchestratorEnv(gym.Env):
             self.idle_streak = 0
 
         # 6. SLA: jobs waiting too long fail
+        # v39: threshold 3x→1.5x để SLA penalty trigger sớm hơn — agent học provision proactive
         total_cap = max(1, total_vcpu)
-        if self.pending_jobs > total_cap * 3:
+        if self.pending_jobs > total_cap * 1.5:
             jobs_failed = max(1, self.pending_jobs // 10)
             actual_remove = min(jobs_failed, len(self.workload_gen.pending_jobs))
             self.workload_gen.pending_jobs = self.workload_gen.pending_jobs[actual_remove:]
@@ -690,12 +690,12 @@ class SpotOrchestratorEnv(gym.Env):
         if self.pending_jobs == 0 and self.running_jobs == 0 and total_instances > 0:
             idle_fleet_penalty = total_instances * self.idle_fleet_penalty_coeff
 
-        # ═══ 8b. EMPTY FLEET PENALTY — v34 ═══
-        # Phạt cố định khi fleet=0 và có pending jobs.
-        # Không scale theo pending: tránh reward magnitude explode khi queue lớn.
+        # ═══ 8b. EMPTY FLEET PENALTY — v34, v39 scale theo pending ═══
+        # v39: scale theo min(pending, 10) — pending càng nhiều, agent càng phải provision
+        # Cap 10 để tránh Q-divergence khi queue burst lớn (50+ jobs).
         empty_fleet_penalty = 0.0
         if total_instances == 0 and self.pending_jobs > 0:
-            empty_fleet_penalty = self.empty_fleet_penalty_coeff
+            empty_fleet_penalty = min(self.pending_jobs, 10) * self.empty_fleet_penalty_coeff
 
         # ═══ 9. PROVISION SPOT BONUS — v26-fix ═══
         provision_spot_bonus = self.step_provision_spot_success * self.provision_spot_bonus_coeff
