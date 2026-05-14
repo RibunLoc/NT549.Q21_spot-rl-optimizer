@@ -16,7 +16,7 @@ set -euo pipefail
 # ── Config ────────────────────────────────────────────────────────────────────
 JENKINS_URL="${JENKINS_URL:-https://jenkins.holoc.id.vn}"
 JENKINS_USER="${JENKINS_USER:-hothanhloc}"
-JENKINS_TOKEN="${JENKINS_TOKEN:-11d644081ebd8eb0daca14922956efcdf1}"
+JENKINS_TOKEN="${JENKINS_TOKEN:-}"
 JOB_NAME="${JOB_NAME:-spot-rl-demo}"   # tên job trên Jenkins
 
 PHASE="${1:-baseline}"
