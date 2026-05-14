@@ -1,0 +1,143 @@
+// Demo workload pipeline — chạy trên Spot agent để tạo workload thực tế
+// Mục đích: cung cấp jobs thực để controller DQN quan sát pending/running
+// và ra quyết định PROVISION/HOLD/RELEASE có bằng chứng rõ ràng.
+//
+// Cách dùng:
+//   1. Tạo Jenkins Job mới → Pipeline → chọn "Pipeline script from SCM"
+//   2. Trỏ tới repo này, Jenkinsfile path: Jenkinsfile.demo
+//   3. Trigger thủ công hoặc dùng script trigger_workload.sh
+//
+// Tham số:
+//   WORKLOAD_SIZE: small (mặc định) | medium | large
+//   SLEEP_SECONDS: thời gian giả lập xử lý (mặc định 120s)
+pipeline {
+    agent { label 'spot-worker' }
+
+    parameters {
+        choice(
+            name: 'WORKLOAD_SIZE',
+            choices: ['small', 'medium', 'large'],
+            description: 'small=1 task, medium=3 tasks, large=6 tasks (chạy parallel)'
+        )
+        string(
+            name: 'SLEEP_SECONDS',
+            defaultValue: '120',
+            description: 'Số giây mỗi task giả lập xử lý (mặc định 120s = 2 phút)'
+        )
+    }
+
+    options {
+        timeout(time: 20, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+    }
+
+    environment {
+        BUILD_LABEL = "demo-workload-${BUILD_NUMBER}"
+    }
+
+    stages {
+
+        // ── 1. Announce ───────────────────────────────────────────────────────
+        stage('Announce') {
+            steps {
+                echo """
+=== Demo Workload Build #${BUILD_NUMBER} ===
+Agent     : ${NODE_NAME}
+Size      : ${params.WORKLOAD_SIZE}
+Duration  : ${params.SLEEP_SECONDS}s per task
+Purpose   : Generate real Jenkins queue depth for DQN controller to observe
+"""
+            }
+        }
+
+        // ── 2. Setup nhẹ ─────────────────────────────────────────────────────
+        stage('Setup') {
+            steps {
+                sh '''
+                    echo "[setup] Node: $(hostname)"
+                    echo "[setup] CPU cores: $(nproc)"
+                    echo "[setup] Memory: $(free -h | grep Mem | awk '{print $2}')"
+                    echo "[setup] Disk: $(df -h / | tail -1 | awk '{print $4}') free"
+                    python3 --version
+                '''
+            }
+        }
+
+        // ── 3. Workload tasks (parallel theo WORKLOAD_SIZE) ───────────────────
+        stage('Workload') {
+            steps {
+                script {
+                    def size   = params.WORKLOAD_SIZE ?: 'small'
+                    def sleepS = params.SLEEP_SECONDS ?: '120'
+
+                    // Số task song song theo size
+                    def taskCounts = [small: 1, medium: 3, large: 6]
+                    def nTasks = taskCounts[size] ?: 1
+
+                    echo "[workload] Running ${nTasks} parallel task(s), each ~${sleepS}s"
+
+                    // Build map các task chạy parallel
+                    def tasks = [:]
+                    for (int i = 1; i <= nTasks; i++) {
+                        def taskId = i // capture cho closure
+                        tasks["task-${taskId}"] = {
+                            stage("Task ${taskId}") {
+                                sh """
+                                    echo "[task-${taskId}] START on \$(hostname) at \$(date)"
+
+                                    # Giả lập CPU workload — tính toán số nguyên tố
+                                    python3 -c "
+import time, math
+start = time.time()
+target = int('${sleepS}')
+count  = 0
+n = 2
+while time.time() - start < target:
+    is_prime = all(n % i != 0 for i in range(2, int(math.sqrt(n)) + 1))
+    if is_prime:
+        count += 1
+    n += 1
+elapsed = time.time() - start
+print(f'[task-${taskId}] found {count} primes in {n} numbers in {elapsed:.1f}s')
+"
+                                    echo "[task-${taskId}] DONE at \$(date)"
+                                """
+                            }
+                        }
+                    }
+
+                    parallel tasks
+                }
+            }
+        }
+
+        // ── 4. Report ─────────────────────────────────────────────────────────
+        stage('Report') {
+            steps {
+                sh '''
+                    echo "=== Build ${BUILD_LABEL} completed ==="
+                    echo "Node        : ${NODE_NAME}"
+                    echo "Workload    : ${WORKLOAD_SIZE}"
+                    echo "Build time  : ${currentBuild.durationString}" 2>/dev/null || true
+                    echo ""
+                    echo "Controller metrics to check:"
+                    echo "  spot_rl_pending_jobs    — should have spiked during queue"
+                    echo "  spot_rl_running_jobs    — this job counted here"
+                    echo "  spot_rl_action_total    — should show PROVISION if pending was high"
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "Build #${BUILD_NUMBER} SUCCESS — workload completed on ${NODE_NAME}"
+        }
+        failure {
+            echo "Build #${BUILD_NUMBER} FAILED on ${NODE_NAME}"
+        }
+        aborted {
+            echo "Build #${BUILD_NUMBER} ABORTED"
+        }
+    }
+}
