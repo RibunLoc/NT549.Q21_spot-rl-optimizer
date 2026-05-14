@@ -11,7 +11,9 @@
 //   WORKLOAD_SIZE: small (mặc định) | medium | large
 //   SLEEP_SECONDS: thời gian giả lập xử lý (mặc định 120s)
 pipeline {
-    agent { label 'spot-worker' }
+    // agent none ở top-level — mỗi stage tự chọn agent để retry độc lập
+    // khi spot bị reclaim, chỉ stage đó retry, không restart toàn bộ pipeline
+    agent none
 
     parameters {
         choice(
@@ -27,7 +29,7 @@ pipeline {
     }
 
     options {
-        timeout(time: 20, unit: 'MINUTES')
+        timeout(time: 60, unit: 'MINUTES') // tăng lên để chứa retry
         buildDiscarder(logRotator(numToKeepStr: '20'))
     }
 
@@ -39,10 +41,10 @@ pipeline {
 
         // ── 1. Announce ───────────────────────────────────────────────────────
         stage('Announce') {
+            agent { label 'spot-worker' }
             steps {
                 echo """
 === Demo Workload Build #${BUILD_NUMBER} ===
-Agent     : ${NODE_NAME}
 Size      : ${params.WORKLOAD_SIZE}
 Duration  : ${params.SLEEP_SECONDS}s per task
 Purpose   : Generate real Jenkins queue depth for DQN controller to observe
@@ -50,8 +52,9 @@ Purpose   : Generate real Jenkins queue depth for DQN controller to observe
             }
         }
 
-        // ── 2. Setup nhẹ ─────────────────────────────────────────────────────
+        // ── 2. Setup ──────────────────────────────────────────────────────────
         stage('Setup') {
+            agent { label 'spot-worker' }
             steps {
                 sh '''
                     echo "[setup] Node: $(hostname)"
@@ -63,69 +66,74 @@ Purpose   : Generate real Jenkins queue depth for DQN controller to observe
             }
         }
 
-        // ── 3. Workload tasks (parallel theo WORKLOAD_SIZE) ───────────────────
+        // ── 3. Workload — retry tối đa 3 lần nếu spot bị reclaim ─────────────
+        // Khi AWS terminate spot instance, Jenkins mất agent → stage FAIL.
+        // retry(3) tự động requeue lên spot-worker mới do controller provision.
         stage('Workload') {
+            agent { label 'spot-worker' }
+            options {
+                retry(3)          // thử lại tối đa 3 lần nếu agent mất
+                timeout(time: 30, unit: 'MINUTES')
+            }
             steps {
                 script {
                     def size   = params.WORKLOAD_SIZE ?: 'small'
                     def sleepS = params.SLEEP_SECONDS ?: '120'
-
-                    // Số task song song theo size
                     def taskCounts = [small: 1, medium: 3, large: 6]
                     def nTasks = taskCounts[size] ?: 1
 
-                    echo "[workload] Running ${nTasks} parallel task(s), each ~${sleepS}s"
+                    echo "[workload] attempt on ${env.NODE_NAME} — ${nTasks} task(s) × ${sleepS}s"
 
-                    // Build map các task chạy parallel
                     def tasks = [:]
                     for (int i = 1; i <= nTasks; i++) {
-                        def taskId = i // capture cho closure
+                        def taskId = i
                         tasks["task-${taskId}"] = {
-                            stage("Task ${taskId}") {
-                                sh """
-                                    echo "[task-${taskId}] START on \$(hostname) at \$(date)"
-
-                                    # Giả lập CPU workload — tính toán số nguyên tố
-                                    python3 -c "
+                            sh """
+                                echo "[task-${taskId}] START on \$(hostname) at \$(date)"
+                                python3 -c "
 import time, math
 start = time.time()
 target = int('${sleepS}')
-count  = 0
-n = 2
+count = 0; n = 2
 while time.time() - start < target:
-    is_prime = all(n % i != 0 for i in range(2, int(math.sqrt(n)) + 1))
-    if is_prime:
+    if all(n % i != 0 for i in range(2, int(math.sqrt(n)) + 1)):
         count += 1
     n += 1
-elapsed = time.time() - start
-print(f'[task-${taskId}] found {count} primes in {n} numbers in {elapsed:.1f}s')
+print(f'[task-${taskId}] {count} primes in {time.time()-start:.1f}s')
 "
-                                    echo "[task-${taskId}] DONE at \$(date)"
-                                """
-                            }
+                                echo "[task-${taskId}] DONE at \$(date)"
+                            """
                         }
                     }
-
                     parallel tasks
+                }
+            }
+            post {
+                failure {
+                    echo "[workload] FAILED — spot instance may have been reclaimed. Jenkins will retry on next available spot-worker."
+                }
+                success {
+                    echo "[workload] completed OK on ${env.NODE_NAME}"
                 }
             }
         }
 
         // ── 4. Report ─────────────────────────────────────────────────────────
         stage('Report') {
+            agent { label 'spot-worker' }
             steps {
                 script {
                     def duration = currentBuild.durationString ?: 'unknown'
                     echo """
-=== Build ${env.BUILD_LABEL} completed ===
-Node        : ${env.NODE_NAME}
+=== Build #${BUILD_NUMBER} completed ===
 Workload    : ${params.WORKLOAD_SIZE}
 Build time  : ${duration}
 
 Controller metrics to check:
-  spot_rl_pending_jobs   — should have spiked during queue
-  spot_rl_running_jobs   — this job counted here
-  spot_rl_action_total   — should show PROVISION if pending was high
+  spot_rl_pending_jobs        — spiked during queue
+  spot_rl_running_jobs        — this job counted here
+  spot_rl_interrupt_streak    — should increase if spot was reclaimed
+  spot_rl_action_total        — PROVISION if pending was high
 """
                 }
             }
@@ -134,10 +142,10 @@ Controller metrics to check:
 
     post {
         success {
-            echo "Build #${BUILD_NUMBER} SUCCESS — workload completed on ${NODE_NAME}"
+            echo "Build #${BUILD_NUMBER} SUCCESS"
         }
         failure {
-            echo "Build #${BUILD_NUMBER} FAILED on ${NODE_NAME}"
+            echo "Build #${BUILD_NUMBER} FAILED after retries — manual check needed"
         }
         aborted {
             echo "Build #${BUILD_NUMBER} ABORTED"

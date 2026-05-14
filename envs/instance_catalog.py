@@ -40,11 +40,11 @@ class InstanceType:
 #   large general (m5.xlarge): deeper pool                     → alpha=0.4
 #   large compute (c5.2xlarge):deepest pool, most stable       → alpha=0.3
 INSTANCE_TYPES: List[InstanceType] = [
-    InstanceType("m5.large",   2,  8.0, 0.096, 0.02, 0.6, 0.36),
-    InstanceType("c5.xlarge",  4,  8.0, 0.170, 0.02, 0.5, 0.36),
-    InstanceType("r5.large",   2, 16.0, 0.126, 0.03, 0.5, 0.35),
-    InstanceType("m5.xlarge",  4, 16.0, 0.192, 0.02, 0.4, 0.35),
-    InstanceType("c5.2xlarge", 8, 16.0, 0.340, 0.02, 0.3, 0.35),
+    InstanceType("m5.large",   2,  8.0, 0.120, 0.02, 0.6, 0.36),
+    InstanceType("c5.xlarge",  4,  8.0, 0.196, 0.02, 0.5, 0.36),
+    InstanceType("r5.large",   2, 16.0, 0.152, 0.03, 0.5, 0.35),
+    InstanceType("m5.xlarge",  4, 16.0, 0.240, 0.02, 0.4, 0.35),
+    InstanceType("c5.2xlarge", 8, 16.0, 0.392, 0.02, 0.3, 0.35),
 ]
 
 AVAILABILITY_ZONES: List[str] = [
