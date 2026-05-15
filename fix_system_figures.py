@@ -177,7 +177,7 @@ plt.close()
 print(f"Saved: action_space_structure.png")
 
 
-# ─── Figure 3: reward_components.png (real coefficients) ─────────────────────
+# ─── Figure 3: reward_components.png — split layout to avoid overlap ────────
 # From envs/spot_orchestrator_env.py v41 defaults:
 #   sla_penalty=3.5 (per failed job)
 #   sla_bonus=0.5   (per step when SLA >= 0.93)

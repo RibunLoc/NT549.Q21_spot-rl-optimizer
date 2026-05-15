@@ -172,6 +172,10 @@ class SpotOrchestratorEnv(gym.Env):
         # avoids turning early random exploration into unavoidable SLA failures.
         self.initial_spot_instances = int(rc.get('initial_spot_instances', 0))
         self.initial_ondemand_instances = int(rc.get('initial_ondemand_instances', 0))
+        # v42: keep a small worker floor so early epsilon exploration cannot
+        # release the bootstrap fleet before the policy learns workload pressure.
+        self.min_total_instances = int(rc.get('min_total_instances', 0))
+        self.min_total_vcpu = int(rc.get('min_total_vcpu', 0))
         # v42: queue-pressure shaping penalizes backlog immediately, before jobs
         # fail and produce delayed SLA penalties.
         self.queue_penalty_coeff = rc.get('queue_penalty', 0.0)
@@ -407,7 +411,9 @@ class SpotOrchestratorEnv(gym.Env):
 
         elif op == Operation.RELEASE_SPOT:
             # Block khi pending > 80% capacity (agent đang overload)
-            if self.pending_jobs > total_vcpu * 0.8:
+            if self._release_would_break_floor(type_idx):
+                self.step_wasted_action = True
+            elif self.pending_jobs > total_vcpu * 0.8:
                 self.step_wasted_action = True
             elif pool.spot_count > 0:
                 pool.spot_count -= 1
@@ -415,7 +421,9 @@ class SpotOrchestratorEnv(gym.Env):
                 self.step_wasted_action = True
 
         elif op == Operation.RELEASE_ONDEMAND:
-            if self.pending_jobs > total_vcpu * 0.8:
+            if self._release_would_break_floor(type_idx):
+                self.step_wasted_action = True
+            elif self.pending_jobs > total_vcpu * 0.8:
                 self.step_wasted_action = True
             elif pool.ondemand_count > 0:
                 pool.ondemand_count -= 1
@@ -1150,6 +1158,16 @@ class SpotOrchestratorEnv(gym.Env):
             total += (pool.spot_count + pool.ondemand_count) * vcpus
         return total
 
+    def _release_would_break_floor(self, type_idx: int) -> bool:
+        """Whether releasing one instance would violate configured worker floor."""
+        if self.min_total_instances > 0 and self._total_instances() - 1 < self.min_total_instances:
+            return True
+        if self.min_total_vcpu > 0:
+            capacity_after_release = self._total_vcpu() - INSTANCE_TYPES[type_idx].vcpus
+            if capacity_after_release < self.min_total_vcpu:
+                return True
+        return False
+
     def _az_instances(self, az_idx: int) -> int:
         """Total instances in a specific AZ."""
         return sum(
@@ -1265,6 +1283,11 @@ class SpotOrchestratorEnv(gym.Env):
                 if pool.spot_count == 0:
                     mask[encode_action(Operation.RELEASE_SPOT, t, az)] = False
                 if pool.ondemand_count == 0:
+                    mask[encode_action(Operation.RELEASE_ONDEMAND, t, az)] = False
+
+                # v42: protect baseline CI/CD workers during high-epsilon exploration.
+                if self._release_would_break_floor(t):
+                    mask[encode_action(Operation.RELEASE_SPOT, t, az)] = False
                     mask[encode_action(Operation.RELEASE_ONDEMAND, t, az)] = False
 
                 # v26-fix: block RELEASE khi sau khi release sẽ không đủ vCPU cho job hiện tại
