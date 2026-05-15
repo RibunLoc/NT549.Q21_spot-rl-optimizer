@@ -168,6 +168,14 @@ class SpotOrchestratorEnv(gym.Env):
         # Cooldown: số steps mỗi pool bị locked sau PROVISION/CONVERT/REBALANCE
         # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh
         self.cooldown_steps = rc.get('cooldown_steps', 2)
+        # v42: CI/CD systems rarely start from zero workers. Warm-start capacity
+        # avoids turning early random exploration into unavoidable SLA failures.
+        self.initial_spot_instances = int(rc.get('initial_spot_instances', 0))
+        self.initial_ondemand_instances = int(rc.get('initial_ondemand_instances', 0))
+        # v42: queue-pressure shaping penalizes backlog immediately, before jobs
+        # fail and produce delayed SLA penalties.
+        self.queue_penalty_coeff = rc.get('queue_penalty', 0.0)
+        self.queue_pressure_cap = rc.get('queue_pressure_cap', 2.0)
 
         # Spaces
         self.observation_space = spaces.Box(
@@ -266,8 +274,46 @@ class SpotOrchestratorEnv(gym.Env):
         sub_seeds = self.np_random.integers(0, 2**31, size=2)
         self.market_sim.reset(seed=int(sub_seeds[0]))
         self.workload_gen.reset(seed=int(sub_seeds[1]))
+        self._seed_initial_capacity()
 
         return self._get_observation(), self._get_info()
+
+    def _seed_initial_capacity(self):
+        """Provision warm-start capacity at reset.
+
+        The reset-time capacity is not an agent action, so it does not add
+        cooldowns or migration counters. Pools are ranked by price ratio and
+        interruption risk to mimic a conservative initial worker pool.
+        """
+        total_initial = self.initial_spot_instances + self.initial_ondemand_instances
+        if total_initial <= 0:
+            return
+
+        ranked_pools = []
+        for t in range(N_TYPES):
+            od_price = INSTANCE_TYPES[t].ondemand_price
+            for az in range(N_AZS):
+                spot_price = self.market_sim.get_pool_price(t, az)
+                interrupt = self.market_sim.get_pool_interrupt_prob(t, az)
+                price_ratio = spot_price / max(od_price, 1e-6)
+                ranked_pools.append((price_ratio + interrupt, t, az))
+        ranked_pools.sort(key=lambda x: x[0])
+
+        def add_instances(count: int, attr: str):
+            added = 0
+            idx = 0
+            while added < count and self._total_instances() < MAX_INSTANCES:
+                _, t, az = ranked_pools[idx % len(ranked_pools)]
+                if self._az_instances(az) < MAX_PER_AZ:
+                    pool = self.pools[(t, az)]
+                    setattr(pool, attr, getattr(pool, attr) + 1)
+                    added += 1
+                idx += 1
+                if idx > len(ranked_pools) * max(MAX_PER_AZ, 1):
+                    break
+
+        add_instances(self.initial_spot_instances, 'spot_count')
+        add_instances(self.initial_ondemand_instances, 'ondemand_count')
 
     def step(
         self, action: int
@@ -732,6 +778,15 @@ class SpotOrchestratorEnv(gym.Env):
         if total_instances == 0 and self.pending_jobs > 0:
             empty_fleet_penalty = min(self.pending_jobs, 10) * self.empty_fleet_penalty_coeff
 
+        # ═══ 8c. QUEUE PRESSURE PENALTY — v42 5-min shaping ═══
+        # Penalize backlog before it turns into failed jobs. This gives the
+        # agent an immediate signal to keep enough workers online for CI bursts.
+        queue_pressure_penalty = 0.0
+        if self.queue_penalty_coeff > 0 and self.pending_jobs > 0:
+            queue_pressure = self.pending_jobs / max(total_fleet_vcpu, 1)
+            queue_pressure = min(queue_pressure, self.queue_pressure_cap)
+            queue_pressure_penalty = queue_pressure * self.queue_penalty_coeff
+
         # ═══ 9. PROVISION SPOT BONUS — v26-fix ═══
         provision_spot_bonus = self.step_provision_spot_success * self.provision_spot_bonus_coeff
 
@@ -760,6 +815,7 @@ class SpotOrchestratorEnv(gym.Env):
             - fleet_size_penalty
             - idle_fleet_penalty
             - empty_fleet_penalty
+            - queue_pressure_penalty
             + provision_spot_bonus
             + sla_bonus
         )
