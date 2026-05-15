@@ -1,0 +1,656 @@
+<mxfile host="65bd71144e">
+    <diagram name="1. System Overview" id="page-overview">
+        <mxGraphModel dx="2526" dy="399" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="title" value="Spot RL Optimization - System Overview" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=24;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="15" width="1050" height="40" as="geometry"/>
+                </mxCell>
+                <mxCell id="z1" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;opacity=25;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="65" width="620" height="490" as="geometry"/>
+                </mxCell>
+                <mxCell id="z1b" value="1" style="ellipse;fillColor=#6c8ebf;strokeColor=#6c8ebf;fontColor=#fff;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="65" width="34" height="34" as="geometry"/>
+                </mxCell>
+                <mxCell id="z1l" value="Training Pipeline" style="text;html=1;strokeColor=none;fillColor=none;fontSize=15;fontStyle=1;fontColor=#23445d;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="68" width="220" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="github" value="&lt;b&gt;GitHub Repo&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="115" width="130" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="runpod" value="&lt;b&gt;RunPod GPU&lt;/b&gt;&lt;br/&gt;Training Server" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="220" y="110" width="150" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="gym_env" value="&lt;b&gt;Gym Environment&lt;/b&gt;&lt;br/&gt;SpotOrchestratorEnv" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="50" y="235" width="170" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="dqn_a" value="&lt;b&gt;DQN Agent&lt;/b&gt;&lt;br/&gt;Factored DQN + PER" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="270" y="235" width="170" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="mlflow_z1" value="&lt;b&gt;MLflow Tracking&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="480" y="235" width="140" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="onnx_z1" value="&lt;b&gt;ONNX Export&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="280" y="390" width="150" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="dvc_z1" value="&lt;b&gt;DVC + S3&lt;/b&gt;&lt;br/&gt;Training Data" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="390" width="150" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="reward_z1" value="&lt;b&gt;Reward Config&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="430" y="115" width="150" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="github" target="runpod" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta1l" value="clone" style="edgeLabel;fontSize=10;" parent="ta1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="runpod" target="gym_env" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta3" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="gym_env" target="dqn_a" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta3l" value="obs+mask/action" style="edgeLabel;fontSize=10;" parent="ta3" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta4" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;dashed=1;" parent="1" source="dqn_a" target="mlflow_z1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta4l" value="log metrics" style="edgeLabel;fontSize=10;" parent="ta4" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta5" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;strokeWidth=2;" parent="1" source="dqn_a" target="onnx_z1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta5l" value="export best" style="edgeLabel;fontSize=10;" parent="ta5" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta6" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d6b656;dashed=1;" parent="1" source="dvc_z1" target="gym_env" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ta6l" value="pull data" style="edgeLabel;fontSize=10;" parent="ta6" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="z2" value="" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;strokeWidth=2;opacity=25;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="65" width="620" height="490" as="geometry"/>
+                </mxCell>
+                <mxCell id="z2b" value="2" style="ellipse;fillColor=#9673a6;strokeColor=#9673a6;fontColor=#fff;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="65" width="34" height="34" as="geometry"/>
+                </mxCell>
+                <mxCell id="z2l" value="RL Controller (EC2)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=15;fontStyle=1;fontColor=#4c1d95;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="68" width="260" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="state_z2" value="&lt;b&gt;State Collector&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="120" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="mask_z2" value="&lt;b&gt;Action Mask&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="910" y="120" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="inf_z2" value="&lt;b&gt;ONNX Inference&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="800" y="230" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="safe_z2" value="&lt;b&gt;Safety Guard&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="1100" y="120" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="reg_z2" value="&lt;b&gt;Agent Registry&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="1120" y="360" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="met_z2" value="&lt;b&gt;Metrics Reporter&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="687" y="390" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="exec_z2" value="&lt;b&gt;Action Executor&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="907" y="360" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#9673a6;strokeWidth=2;" parent="1" source="state_z2" target="inf_z2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca1l" value="state[90]" style="edgeLabel;fontSize=10;" parent="ca1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#9673a6;strokeWidth=2;" parent="1" source="mask_z2" target="inf_z2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca2l" value="mask[121]" style="edgeLabel;fontSize=10;" parent="ca2" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca3" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;strokeWidth=2;" parent="1" source="inf_z2" target="safe_z2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca3l" value="action" style="edgeLabel;fontSize=10;" parent="ca3" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca4" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;strokeWidth=2;" parent="1" source="safe_z2" target="exec_z2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca4l" value="allowed" style="edgeLabel;fontSize=10;" parent="ca4" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ca5" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="exec_z2" target="reg_z2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="z3" value="" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;opacity=25;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="590" width="620" height="380" as="geometry"/>
+                </mxCell>
+                <mxCell id="z3b" value="3" style="ellipse;fillColor=#82b366;strokeColor=#82b366;fontColor=#fff;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="590" width="34" height="34" as="geometry"/>
+                </mxCell>
+                <mxCell id="z3l" value="AWS Infrastructure" style="text;html=1;strokeColor=none;fillColor=none;fontSize=15;fontStyle=1;fontColor=#1a4731;" parent="1" vertex="1">
+                    <mxGeometry x="60" y="593" width="240" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="ec2s" value="&lt;b&gt;EC2 Spot Fleet&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="45" y="640" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="ec2o" value="&lt;b&gt;EC2 On-Demand&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="225" y="640" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="sqs_z3" value="&lt;b&gt;SQS Queue&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="405" y="640" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="cw_z3" value="&lt;b&gt;CloudWatch&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="45" y="790" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="lt_z3" value="&lt;b&gt;Launch Template&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="225" y="730" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="ae1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;dashed=1;" parent="1" source="lt_z3" target="ec2s" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ae1l" value="userdata" style="edgeLabel;fontSize=10;" parent="ae1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="z4" value="" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;opacity=25;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="590" width="620" height="390" as="geometry"/>
+                </mxCell>
+                <mxCell id="z4b" value="4" style="ellipse;fillColor=#d6b656;strokeColor=#d6b656;fontColor=#fff;fontSize=16;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="680" y="590" width="34" height="34" as="geometry"/>
+                </mxCell>
+                <mxCell id="z4l" value="Observability and CI/CD" style="text;html=1;strokeColor=none;fillColor=none;fontSize=15;fontStyle=1;fontColor=#78350f;" parent="1" vertex="1">
+                    <mxGeometry x="720" y="593" width="280" height="28" as="geometry"/>
+                </mxCell>
+                <mxCell id="prom_z4" value="&lt;b&gt;Prometheus&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="707" y="640" width="140" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="mfui_z4" value="&lt;b&gt;MLflow UI&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="1060" y="640" width="140" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="trig_z4" value="&lt;b&gt;trigger_workload.sh&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="730" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="jen_z4" value="&lt;b&gt;Jenkins CI&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="880" y="730" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="jenq_z4" value="&lt;b&gt;Jenkins Build Queue&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=2;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="875" y="840" width="165" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="wkr_z4" value="&lt;b&gt;spot-worker&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="1060" y="730" width="155" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="graf_z4" value="&lt;b&gt;Grafana&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="887" y="640" width="140" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="oe1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;strokeWidth=2;" parent="1" source="prom_z4" target="graf_z4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="oe1l" value="PromQL" style="edgeLabel;fontSize=10;" parent="oe1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ce1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d6b656;strokeWidth=2;" parent="1" source="trig_z4" target="jen_z4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ce1l" value="HTTP POST" style="edgeLabel;fontSize=10;" parent="ce1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ce2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d79b00;strokeWidth=2;" parent="1" source="jen_z4" target="jenq_z4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ce2l" value="enqueue build" style="edgeLabel;fontSize=10;" parent="ce2" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ce3" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;strokeWidth=2;" parent="1" source="jenq_z4" target="wkr_z4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ce3l" value="dispatch to node" style="edgeLabel;fontSize=10;" parent="ce3" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="x1" value="deploy model" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;strokeWidth=3;" parent="1" source="onnx_z1" target="inf_z2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="x4" value="enqueue" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d6b656;dashed=1;" parent="1" source="jen_z4" target="sqs_z3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="x5" value="consume" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="wkr_z4" target="sqs_z3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="x6" value="metrics" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;dashed=1;" parent="1" source="met_z2" target="prom_z4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram name="2. Training Components" id="page-training">
+        <mxGraphModel dx="872" dy="399" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="t_title" value="Training Repo - Component Detail (spot-rl-optimiztion)" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=22;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="15" width="1050" height="36" as="geometry"/>
+                </mxCell>
+                <mxCell id="env_grp" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="65" width="390" height="580" as="geometry"/>
+                </mxCell>
+                <mxCell id="env_lbl" value="envs/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#23445d;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="70" width="100" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="soe" value="&lt;b&gt;spot_orchestrator_env.py&lt;/b&gt;&lt;br/&gt;SpotOrchestratorEnv&lt;br/&gt;step() reset() get_action_mask()&lt;br/&gt;reward shaping SLA tracking" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="100" width="220" height="85" as="geometry"/>
+                </mxCell>
+                <mxCell id="mse" value="&lt;b&gt;mixed_scenario_env.py&lt;/b&gt;&lt;br/&gt;MixedScenarioEnv&lt;br/&gt;Round-robin 4 scenarios&lt;br/&gt;scenario weights" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="210" width="220" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="wg" value="&lt;b&gt;workload_generator.py&lt;/b&gt;&lt;br/&gt;Poisson arrivals&lt;br/&gt;step//4 = hour&lt;br/&gt;peak / spike patterns" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="315" width="220" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="ms" value="&lt;b&gt;market_simulator.py&lt;/b&gt;&lt;br/&gt;Spot price from CSV&lt;br/&gt;Interrupt probability" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="420" width="160" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="ic" value="&lt;b&gt;instance_catalog.py&lt;/b&gt;&lt;br/&gt;STATE_DIM=90&lt;br/&gt;InstanceVCPUs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="210" y="420" width="160" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="as_" value="&lt;b&gt;action_schema.py&lt;/b&gt;&lt;br/&gt;N_ACTIONS=121&lt;br/&gt;8 ops x 15 pools + HOLD" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="270" y="315" width="120" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="spot_env_py" value="&lt;b&gt;spot_env.py&lt;/b&gt;&lt;br/&gt;SpotEnv base class&lt;br/&gt;observation space def&lt;br/&gt;fleet state encoding" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="520" width="190" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="cost_calc" value="&lt;b&gt;cost_calculator.py&lt;/b&gt;&lt;br/&gt;CostCalculator&lt;br/&gt;spot_cost od_cost&lt;br/&gt;savings vs baseline" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="240" y="520" width="145" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;" parent="1" source="mse" target="soe" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee1l" value="wraps" style="edgeLabel;fontSize=10;" parent="ee1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;" parent="1" source="soe" target="wg" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee3" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;" parent="1" source="soe" target="ms" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee4" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;" parent="1" source="soe" target="ic" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee5" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;" parent="1" source="soe" target="as_" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee6" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;" parent="1" source="soe" target="cost_calc" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee7" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;dashed=1;" parent="1" source="spot_env_py" target="soe" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ee7l" value="inherits" style="edgeLabel;fontSize=10;" parent="ee7" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="agt_grp" value="" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="440" y="65" width="360" height="460" as="geometry"/>
+                </mxCell>
+                <mxCell id="agt_lbl" value="agents/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#4c1d95;" parent="1" vertex="1">
+                    <mxGeometry x="450" y="70" width="100" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="dqn_c" value="&lt;b&gt;dqn_agent.py&lt;/b&gt;&lt;br/&gt;DQNAgent&lt;br/&gt;select_action() train_step()&lt;br/&gt;save() load() export_onnx()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="455" y="100" width="220" height="85" as="geometry"/>
+                </mxCell>
+                <mxCell id="net_c" value="&lt;b&gt;networks.py&lt;/b&gt;&lt;br/&gt;FactoredDQN&lt;br/&gt;shared_enc + op_head&lt;br/&gt;+ type_head + az_head" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="455" y="215" width="220" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="per_c" value="&lt;b&gt;replay_buffer.py&lt;/b&gt;&lt;br/&gt;PrioritizedReplayBuffer&lt;br/&gt;SumTree IS weights&lt;br/&gt;alpha=0.5 beta anneal" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="455" y="320" width="220" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="base_c" value="&lt;b&gt;baselines.py&lt;/b&gt;&lt;br/&gt;GreedyCostPolicy&lt;br/&gt;RandomPolicy&lt;br/&gt;AlwaysSpotPolicy" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="455" y="425" width="220" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="ae1_" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#9673a6;" parent="1" source="dqn_c" target="net_c" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ae1_l" value="uses" style="edgeLabel;fontSize=10;" parent="ae1_" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ae2_" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#9673a6;" parent="1" source="dqn_c" target="per_c" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="ae2_l" value="stores" style="edgeLabel;fontSize=10;" parent="ae2_" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="utl_grp" value="" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="830" y="65" width="280" height="250" as="geometry"/>
+                </mxCell>
+                <mxCell id="utl_lbl" value="utils/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#78350f;" parent="1" vertex="1">
+                    <mxGeometry x="840" y="70" width="80" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="mlf_u" value="&lt;b&gt;mlflow_logger.py&lt;/b&gt;&lt;br/&gt;MLflowLogger wrapper" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="845" y="100" width="180" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="met_u" value="&lt;b&gt;metrics.py&lt;/b&gt;&lt;br/&gt;SLA cost savings calc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="845" y="170" width="180" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="viz_u" value="&lt;b&gt;visualization.py&lt;/b&gt;&lt;br/&gt;Plot learning curves" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="845" y="240" width="180" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="exp_grp" value="" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="830" y="340" width="280" height="215" as="geometry"/>
+                </mxCell>
+                <mxCell id="exp_lbl" value="experiments/ + scripts/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1;fontColor=#7f1d1d;" parent="1" vertex="1">
+                    <mxGeometry x="840" y="345" width="240" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="eval_e" value="&lt;b&gt;evaluate.py&lt;/b&gt;&lt;br/&gt;Greedy eval SLA cost&lt;br/&gt;compare vs baselines" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="845" y="375" width="180" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="exp_e" value="&lt;b&gt;export_model.py&lt;/b&gt;&lt;br/&gt;PyTorch to ONNX&lt;br/&gt;dqn_v39.onnx" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="845" y="455" width="180" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="nb_box" value="&lt;b&gt;runpod_train.ipynb&lt;/b&gt;&lt;br/&gt;Cell 1: install deps&lt;br/&gt;Cell 5: setup env+agent&lt;br/&gt;Cell 6: MLflow setup&lt;br/&gt;Cell 7: training loop&lt;br/&gt;NUM_EPISODES=6000 max_steps=672" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="1140" y="65" width="200" height="140" as="geometry"/>
+                </mxCell>
+                <mxCell id="te1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="soe" target="dqn_c" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="te1l" value="obs/action" style="edgeLabel;fontSize=10;" parent="te1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="te2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#9673a6;dashed=1;" parent="1" source="dqn_c" target="mlf_u" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="te2l" value="log" style="edgeLabel;fontSize=10;" parent="te2" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="te3" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;strokeWidth=2;" parent="1" source="dqn_c" target="exp_e" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="te3l" value="export" style="edgeLabel;fontSize=10;" parent="te3" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="te4" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="nb_box" target="dqn_c" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="te4l" value="orchestrates" style="edgeLabel;fontSize=10;" parent="te4" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+    <diagram name="3. Controller Components" id="page-controller">
+        <mxGraphModel dx="1200" dy="500" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920" pageHeight="1400" math="0" shadow="0">
+            <root>
+                <mxCell id="0"/>
+                <mxCell id="1" parent="0"/>
+                <mxCell id="c_title" value="Controller Repo - Full Component Detail (spot-rl-controller)" style="text;html=1;strokeColor=none;fillColor=none;align=center;fontSize=22;fontStyle=1;" parent="1" vertex="1">
+                    <mxGeometry x="300" y="15" width="1300" height="36" as="geometry"/>
+                </mxCell>
+                <mxCell id="cmd_bg" value="" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="60" width="260" height="350" as="geometry"/>
+                </mxCell>
+                <mxCell id="cmd_lbl" value="cmd/controller/main.go" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#4c1d95;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="65" width="240" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="main_loop" value="&lt;b&gt;Main Loop&lt;/b&gt;&lt;br/&gt;ticker: 900s interval&lt;br/&gt;calls runStep()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="95" width="230" height="65" as="geometry"/>
+                </mxCell>
+                <mxCell id="goroutine1" value="&lt;b&gt;Goroutine 1 Metrics Flush&lt;/b&gt;&lt;br/&gt;every METRICS_REFRESH_SEC=15s&lt;br/&gt;metricsCache.flush()&lt;br/&gt;re-push cached metrics to Prometheus" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;strokeWidth=2;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="175" width="230" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="goroutine2" value="&lt;b&gt;Goroutine 2 Workload Refresh&lt;/b&gt;&lt;br/&gt;every WORKLOAD_REFRESH_SEC=30s&lt;br/&gt;metricsCache.updateWorkload()&lt;br/&gt;Jenkins: pending/running/spot/OD" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;strokeWidth=2;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="265" width="230" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="shadow_mode" value="&lt;b&gt;SHADOW_MODE flag&lt;/b&gt;&lt;br/&gt;if true: log decision only&lt;br/&gt;skip executor entirely&lt;br/&gt;(dry-run / test mode)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=2;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="35" y="355" width="230" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs_bg" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;opacity=20;" parent="1" vertex="1">
+                    <mxGeometry x="310" y="60" width="340" height="730" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs_lbl" value="runStep() Pipeline - 8 steps" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#23445d;" parent="1" vertex="1">
+                    <mxGeometry x="320" y="65" width="310" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs1" value="&lt;b&gt;1. fetchAllPools()&lt;/b&gt;&lt;br/&gt;EC2 counts (spot/OD) per pool&lt;br/&gt;SPS score + PriceCV24h&lt;br/&gt;CloudWatch CPU+RAM util" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="100" width="310" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs2" value="&lt;b&gt;2. Workload: Jenkins + fallback SQS&lt;/b&gt;&lt;br/&gt;Jenkins.GetQueueDepth() (HTTP API)&lt;br/&gt;if Jenkins fails: SQS.GetQueueDepth()&lt;br/&gt;also GetBuildRateLastHour()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="185" width="310" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs3" value="&lt;b&gt;3. stepInterrupts detection&lt;/b&gt;&lt;br/&gt;stepInterrupts = prevSpotCount - currentSpot&lt;br/&gt;when spot drops without RELEASE action&lt;br/&gt;AWS-initiated interruption signal" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="275" width="310" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs4" value="&lt;b&gt;4. collector.Collect()&lt;/b&gt;&lt;br/&gt;Build state vector[90]&lt;br/&gt;SLAHealth() + SPS + PriceCV&lt;br/&gt;buildsLastHour + stepInterrupts" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="365" width="310" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs5" value="&lt;b&gt;5. BuildActionMask()&lt;/b&gt;&lt;br/&gt;mask[121]: invalid actions = 0&lt;br/&gt;PROVISION: poolFull or saturated&lt;br/&gt;RELEASE: count==0 or cap &lt; running" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="455" width="310" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs6" value="&lt;b&gt;6. model.Predict()&lt;/b&gt;&lt;br/&gt;ONNX: state[90] -&gt; Q[121]&lt;br/&gt;argmax(Q * mask) = action idx&lt;br/&gt;returns Q-value for logging" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="545" width="310" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="rs7" value="&lt;b&gt;7. guard.Allow()&lt;/b&gt;&lt;br/&gt;safety check: killswitch / rate / cost / fleet" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="630" width="310" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="exec_branch" value="&lt;b&gt;8. SHADOW_MODE check&lt;/b&gt;&lt;br/&gt;YES: log only, skip executor&lt;br/&gt;NO: executor.Execute() + guard.MarkExecuted() + Prometheus" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="325" y="695" width="310" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="st_bg" value="" style="rounded=1;fillColor=#dae8fc;strokeColor=#6c8ebf;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="690" y="60" width="290" height="330" as="geometry"/>
+                </mxCell>
+                <mxCell id="st_lbl" value="internal/state/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#23445d;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="65" width="180" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="col_go" value="&lt;b&gt;collector.go&lt;/b&gt;&lt;br/&gt;Collect() -&gt; state[90]&lt;br/&gt;Jenkins: pending/running&lt;br/&gt;EC2: spot/OD counts per pool&lt;br/&gt;SLAHealth() buildsLastHour&lt;br/&gt;stepInterrupts SPS PriceCV" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="705" y="95" width="260" height="105" as="geometry"/>
+                </mxCell>
+                <mxCell id="mask_go_c" value="&lt;b&gt;mask.go&lt;/b&gt;&lt;br/&gt;BuildActionMask() bool[121]&lt;br/&gt;PROVISION: poolFull or saturated&lt;br/&gt;RELEASE: count==0 or capacityAfterRelease&lt;br/&gt;CONVERT REBALANCE guards" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="705" y="215" width="260" height="95" as="geometry"/>
+                </mxCell>
+                <mxCell id="sla_go" value="&lt;b&gt;sla.go&lt;/b&gt;&lt;br/&gt;SLAHealth() -&gt; float32&lt;br/&gt;pending / (running+spot) ratio" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="705" y="325" width="260" height="50" as="geometry"/>
+                </mxCell>
+                <mxCell id="fap_bg" value="" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="690" y="410" width="290" height="310" as="geometry"/>
+                </mxCell>
+                <mxCell id="fap_lbl" value="internal/aws/ (fetchAllPools)" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#1a4731;" parent="1" vertex="1">
+                    <mxGeometry x="700" y="415" width="270" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="ec2_go" value="&lt;b&gt;ec2.go&lt;/b&gt;&lt;br/&gt;DescribeInstances() per pool&lt;br/&gt;RunInstances() TerminateInstances()&lt;br/&gt;15 pools = 5 types x 3 AZs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="705" y="445" width="260" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="pricing_go" value="&lt;b&gt;pricing.go&lt;/b&gt;&lt;br/&gt;GetSpotPlacementScore() SPS [0.1-1.0]&lt;br/&gt;estimateInterrupt(sps) -&gt; prob [0.45-0.05]&lt;br/&gt;GetPriceCV() -&gt; PriceCV24h volatility" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="705" y="530" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="cw_go" value="&lt;b&gt;cloudwatch.go&lt;/b&gt;&lt;br/&gt;GetCPUUtilization() per pool&lt;br/&gt;GetMemoryUtilization() per pool" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="705" y="625" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="inf_bg" value="" style="rounded=1;fillColor=#e1d5e7;strokeColor=#9673a6;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="1020" y="60" width="290" height="160" as="geometry"/>
+                </mxCell>
+                <mxCell id="inf_lbl" value="internal/inference/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#4c1d95;" parent="1" vertex="1">
+                    <mxGeometry x="1030" y="65" width="200" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="model_go" value="&lt;b&gt;model.go&lt;/b&gt;&lt;br/&gt;LoadModel(dqn.onnx)&lt;br/&gt;Predict(state[90], mask[121])&lt;br/&gt;argmax(Q * mask) + Q-value&lt;br/&gt;onnxruntime-go backend" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1035" y="95" width="260" height="105" as="geometry"/>
+                </mxCell>
+                <mxCell id="saf_bg" value="" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="1020" y="250" width="290" height="250" as="geometry"/>
+                </mxCell>
+                <mxCell id="saf_lbl" value="internal/safety/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#7f1d1d;" parent="1" vertex="1">
+                    <mxGeometry x="1030" y="255" width="200" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="limits_go" value="&lt;b&gt;limits.go Guard.Allow()&lt;/b&gt;&lt;br/&gt;1. killswitch file /tmp/rl_killswitch&lt;br/&gt;2. cost circuit breaker max $2/h&lt;br/&gt;3. fleet size cap max 5 total&lt;br/&gt;4. rate limit: rolling 1h max 30&lt;br/&gt;5. min action interval 120s" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1035" y="285" width="260" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="mark_exec" value="&lt;b&gt;guard.MarkExecuted()&lt;/b&gt;&lt;br/&gt;Record timestamp + cost&lt;br/&gt;for rate/cost tracking" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1035" y="425" width="260" height="55" as="geometry"/>
+                </mxCell>
+                <mxCell id="act_bg" value="" style="rounded=1;fillColor=#d5e8d4;strokeColor=#82b366;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="1020" y="530" width="290" height="180" as="geometry"/>
+                </mxCell>
+                <mxCell id="act_lbl" value="internal/action/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#1a4731;" parent="1" vertex="1">
+                    <mxGeometry x="1030" y="535" width="180" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="exec_go" value="&lt;b&gt;executor.go Execute(action)&lt;/b&gt;&lt;br/&gt;PROVISION_SPOT: ec2.RunInstances()&lt;br/&gt;RELEASE_SPOT: drain 90s + Terminate&lt;br/&gt;CONVERT_TO_OD: modify instance type&lt;br/&gt;REBALANCE: terminate + re-provision AZ" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1035" y="565" width="260" height="125" as="geometry"/>
+                </mxCell>
+                <mxCell id="jen_bg" value="" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="1360" y="60" width="290" height="310" as="geometry"/>
+                </mxCell>
+                <mxCell id="jen_lbl" value="internal/jenkins/ + sqs/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#78350f;" parent="1" vertex="1">
+                    <mxGeometry x="1370" y="65" width="260" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="jencl_go" value="&lt;b&gt;jenkins/client.go&lt;/b&gt;&lt;br/&gt;GetQueueDepth() pendingCount&lt;br/&gt;GetRunningJobs() runningCount&lt;br/&gt;GetBuildRateLastHour() buildsLastHour" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1375" y="95" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="fallback_box" value="&lt;b&gt;SQS Fallback&lt;/b&gt;&lt;br/&gt;if Jenkins API fails:&lt;br/&gt;sqs.GetQueueDepth()&lt;br/&gt;spot-rl-jobs queue" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=2;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1375" y="190" width="260" height="70" as="geometry"/>
+                </mxCell>
+                <mxCell id="sqs_go" value="&lt;b&gt;sqs/client.go&lt;/b&gt;&lt;br/&gt;SQSClient GetQueueDepth()&lt;br/&gt;ApproximateNumberOfMessages" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1375" y="275" width="260" height="60" as="geometry"/>
+                </mxCell>
+                <mxCell id="reg_met_bg" value="" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="1360" y="400" width="290" height="230" as="geometry"/>
+                </mxCell>
+                <mxCell id="reg_met_lbl" value="internal/registry/ + metrics/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#7f1d1d;" parent="1" vertex="1">
+                    <mxGeometry x="1370" y="405" width="270" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="reg_go" value="&lt;b&gt;registry/registry.go&lt;/b&gt;&lt;br/&gt;Register(instanceID, nodeURL)&lt;br/&gt;Deregister(instanceID)&lt;br/&gt;DrainAgent(nodeURL, timeout=90s)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1375" y="435" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="rep_go" value="&lt;b&gt;metrics/reporter.go&lt;/b&gt;&lt;br/&gt;Prometheus pushgateway :9091&lt;br/&gt;fleet_size spot_count od_count&lt;br/&gt;cost_per_hour actions_total SLA" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="1375" y="530" width="260" height="80" as="geometry"/>
+                </mxCell>
+                <mxCell id="pkg_bg" value="" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;strokeWidth=2;opacity=30;" parent="1" vertex="1">
+                    <mxGeometry x="20" y="450" width="260" height="120" as="geometry"/>
+                </mxCell>
+                <mxCell id="pkg_lbl" value="pkg/types/" style="text;html=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1;fontColor=#78350f;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="455" width="120" height="24" as="geometry"/>
+                </mxCell>
+                <mxCell id="types_go" value="&lt;b&gt;types.go&lt;/b&gt;&lt;br/&gt;PoolInfo Action ActionDim=121&lt;br/&gt;NPools=15 NAZs=3 NTypes=5&lt;br/&gt;OnDemandPrices InstanceVCPUs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" parent="1" vertex="1">
+                    <mxGeometry x="30" y="480" width="235" height="75" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_g1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;dashed=1;" parent="1" source="main_loop" target="goroutine1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_g1l" value="spawn" style="edgeLabel;fontSize=9;" parent="e_g1" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_g2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;dashed=1;" parent="1" source="main_loop" target="goroutine2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_g2l" value="spawn" style="edgeLabel;fontSize=9;" parent="e_g2" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs1" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="main_loop" target="rs1" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_12" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="rs1" target="rs2" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_23" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="rs2" target="rs3" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_34" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="rs3" target="rs4" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_45" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;strokeWidth=2;" parent="1" source="rs4" target="rs5" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_56" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#9673a6;strokeWidth=2;" parent="1" source="rs5" target="rs6" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_67" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;strokeWidth=2;" parent="1" source="rs6" target="rs7" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_7ex" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;strokeWidth=2;" parent="1" source="rs7" target="exec_branch" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_shadow" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d79b00;dashed=1;strokeWidth=2;" parent="1" source="shadow_mode" target="exec_branch" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_shadowl" value="controls" style="edgeLabel;fontSize=9;" parent="e_shadow" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs4col" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;dashed=1;" parent="1" source="rs4" target="col_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs4coll" value="calls" style="edgeLabel;fontSize=9;" parent="e_rs4col" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs5mask" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;dashed=1;" parent="1" source="rs5" target="mask_go_c" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs6mod" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#9673a6;dashed=1;" parent="1" source="rs6" target="model_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs7lim" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;dashed=1;" parent="1" source="rs7" target="limits_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_exbex" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="exec_branch" target="exec_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs1fap" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="rs1" target="ec2_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs1fapl" value="EC2 counts" style="edgeLabel;fontSize=9;" parent="e_rs1fap" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs1pri" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="rs1" target="pricing_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs1pril" value="SPS+CV" style="edgeLabel;fontSize=9;" parent="e_rs1pri" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs1cw" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="rs1" target="cw_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs1cwl" value="CPU+RAM" style="edgeLabel;fontSize=9;" parent="e_rs1cw" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs2jen" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d6b656;dashed=1;" parent="1" source="rs2" target="jencl_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs2jenl" value="primary" style="edgeLabel;fontSize=9;" parent="e_rs2jen" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs2fb" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d79b00;dashed=1;strokeWidth=2;" parent="1" source="rs2" target="fallback_box" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_rs2fbl" value="fallback" style="edgeLabel;fontSize=9;" parent="e_rs2fb" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_fbsqs" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#d79b00;" parent="1" source="fallback_box" target="sqs_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_colsla" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#6c8ebf;" parent="1" source="col_go" target="sla_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_exreg" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="exec_go" target="reg_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_exregl" value="drain+deregister" style="edgeLabel;fontSize=9;" parent="e_exreg" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_exec2" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#82b366;dashed=1;" parent="1" source="exec_go" target="ec2_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_exec2l" value="Run/Terminate" style="edgeLabel;fontSize=9;" parent="e_exec2" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_g2rep" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;dashed=1;" parent="1" source="goroutine2" target="rep_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_g2repl" value="push metrics" style="edgeLabel;fontSize=9;" parent="e_g2rep" vertex="1" connectable="0">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+                <mxCell id="e_mrep" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#b85450;dashed=1;" parent="1" source="mark_exec" target="rep_go" edge="1">
+                    <mxGeometry relative="1" as="geometry"/>
+                </mxCell>
+            </root>
+        </mxGraphModel>
+    </diagram>
+</mxfile>

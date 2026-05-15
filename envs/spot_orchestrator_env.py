@@ -57,12 +57,21 @@ class SpotOrchestratorEnv(gym.Env):
         reward_config: Dict[str, Any] = None,
         seed: Optional[int] = None,
         render_mode: str = None,
+        step_minutes: int = 15,   # v42: time resolution. 15 = legacy v41, 5 = v42.
     ):
         super().__init__()
 
         self.max_steps = max_steps
         self.sla_threshold = sla_threshold
         self.render_mode = render_mode
+
+        # Time resolution. steps_per_hour must be a positive integer for clean
+        # hour/day bucketing in time features and workload generator.
+        if step_minutes <= 0 or 60 % step_minutes != 0:
+            raise ValueError(f"step_minutes must divide 60 evenly, got {step_minutes}")
+        self.step_minutes = step_minutes
+        self.steps_per_hour = 60 // step_minutes
+        self.step_hours = step_minutes / 60.0
 
         # Load price data
         if price_data is not None:
@@ -95,12 +104,24 @@ class SpotOrchestratorEnv(gym.Env):
 
         # Workload generator
         # v14: defaults scaled for 15-min step (÷4 rate, ×4 duration vs hourly)
+        # v42: if `base_arrival_rate_per_hour` is supplied, scale by steps_per_hour;
+        # otherwise keep `base_arrival_rate` semantics (jobs/step, legacy v41).
+        # `avg_job_duration_hours` likewise overrides `avg_job_duration` (steps).
         wc = workload_config or {}
+        if 'base_arrival_rate_per_hour' in wc:
+            arrival_rate = wc['base_arrival_rate_per_hour'] / self.steps_per_hour
+        else:
+            arrival_rate = wc.get('base_arrival_rate', 1.25)
+        if 'avg_job_duration_hours' in wc:
+            job_duration = max(1, int(round(wc['avg_job_duration_hours'] * self.steps_per_hour)))
+        else:
+            job_duration = wc.get('avg_job_duration', 12)
         self.workload_gen = WorkloadGenerator(
-            base_arrival_rate=wc.get('base_arrival_rate', 1.25),   # 5/h → 1.25/15min
+            base_arrival_rate=arrival_rate,
             peak_multiplier=wc.get('peak_multiplier', 3.0),
-            avg_job_duration=wc.get('avg_job_duration', 12),        # 3h → 12 steps
+            avg_job_duration=job_duration,
             seed=seed,
+            steps_per_hour=self.steps_per_hour,
         )
 
         # Reward config — rescale xuống cùng magnitude với savings ($0.1-2/step)
@@ -577,12 +598,17 @@ class SpotOrchestratorEnv(gym.Env):
             self.pending_history.pop(0)
 
         # 9. Compute step cost
+        # Legacy v41 (step_minutes=15) keeps `count × $/h per step` semantics so
+        # eval numbers stay comparable. Other resolutions scale by step_hours/0.25
+        # so cost magnitudes match v41 across the same wallclock window.
+        cost_scale = 1.0 if self.step_minutes == 15 else (self.step_hours / 0.25)
         self.step_cost = 0.0
         for (t_idx, az_idx), pool in self.pools.items():
             spot_price = self.market_sim.get_pool_price(t_idx, az_idx)
             od_price = INSTANCE_TYPES[t_idx].ondemand_price
             self.step_cost += pool.spot_count * spot_price
             self.step_cost += pool.ondemand_count * od_price
+        self.step_cost *= cost_scale
         self.total_cost += self.step_cost
 
         # 10. Migrate-back tracking
@@ -888,9 +914,10 @@ class SpotOrchestratorEnv(gym.Env):
             avg_ram = 1.0
         features.append(np.clip(avg_ram / MAX_JOB_RAM, 0.0, 1.0))  # [26]
 
-        # [27-29] Time — v14: 1 step = 15 min (was 1h)
-        hour = (self.current_step // 4) % 24   # 4 steps = 1 hour
-        day = (self.current_step // (4 * 24)) % 7
+        # [27-29] Time — v14: 1 step = 15 min (4 steps/hour). v42: configurable.
+        sph = self.steps_per_hour
+        hour = (self.current_step // sph) % 24
+        day = (self.current_step // (sph * 24)) % 7
         progress = self.current_step / max(self.max_steps, 1)
 
         features.append(hour / 23.0)  # [27]

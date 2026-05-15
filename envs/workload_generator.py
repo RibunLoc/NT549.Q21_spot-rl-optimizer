@@ -65,6 +65,7 @@ class WorkloadGenerator:
         spike_probability: float = 0.02,
         spike_multiplier: float = 3.0,
         seed: Optional[int] = None,
+        steps_per_hour: int = 4,
     ):
         """
         Khởi tạo bộ sinh workload.
@@ -85,6 +86,7 @@ class WorkloadGenerator:
         self.weekend_factor = weekend_factor
         self.spike_probability = spike_probability
         self.spike_multiplier = spike_multiplier
+        self.steps_per_hour = steps_per_hour
         self.rng = np.random.default_rng(seed)
 
         # Job resource profile — mix of light/medium/heavy jobs
@@ -123,10 +125,10 @@ class WorkloadGenerator:
         Returns:
             Arrival rate (jobs/step)
         """
-        # 1 step = 15 min → 4 steps = 1 hour, 96 steps = 1 day
-        # Đồng bộ với env state feature [27-28]: hour = step//4 % 24, day = step//96 % 7
-        hour_of_day = (self.current_timestep // 4) % 24
-        day_of_week = (self.current_timestep // (4 * 24)) % 7  # 0=Mon ... 6=Sun
+        # Đồng bộ với env state feature [27-28] qua steps_per_hour.
+        sph = self.steps_per_hour
+        hour_of_day = (self.current_timestep // sph) % 24
+        day_of_week = (self.current_timestep // (sph * 24)) % 7  # 0=Mon ... 6=Sun
 
         # Base rate × hourly profile (smooth transitions)
         rate = self.base_arrival_rate * self.hourly_profile[hour_of_day]

@@ -1,0 +1,240 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Spot RL Architecture">
+    <mxGraphModel dx="1600" dy="900" grid="1" gridSize="10" guides="1" tooltips="1"
+      connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1920"
+      pageHeight="1080" math="0" shadow="0">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+```
+    <!-- TITLE -->
+    <mxCell id="title"
+      value="Spot RL Optimization Architecture"
+      style="text;html=1;strokeColor=none;fillColor=none;fontSize=28;fontStyle=1;"
+      vertex="1" parent="1">
+      <mxGeometry x="620" y="20" width="500" height="40" as="geometry"/>
+    </mxCell>
+
+    <!-- SECTION 1 -->
+    <mxCell id="sec1"
+      value="1. Training Pipeline"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#60a5fa;fontSize=20;fontStyle=1;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="80" width="760" height="500" as="geometry"/>
+    </mxCell>
+
+    <!-- GitHub -->
+    <mxCell id="github"
+      value="GitHub Repo&#xa;spot-rl-optimizer"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#3b82f6;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="140" width="180" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- RunPod -->
+    <mxCell id="runpod"
+      value="RunPod GPU&#xa;RTX 2000 Ada"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#3b82f6;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="340" y="140" width="220" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- Gym -->
+    <mxCell id="gym"
+      value="Gym Environment&#xa;SpotOrchestratorEnv"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#60a5fa;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="300" width="240" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- DQN -->
+    <mxCell id="dqn"
+      value="DQN Agent&#xa;PER + Action Mask"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8ff;strokeColor=#a855f7;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="380" y="300" width="240" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- MLflow -->
+    <mxCell id="mlflow"
+      value="MLflow Tracking&#xa;metrics / SLA / cost"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#ef4444;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="640" y="300" width="220" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- ONNX -->
+    <mxCell id="onnx"
+      value="ONNX Export&#xa;dqn_v39.onnx"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#22c55e;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="380" y="450" width="240" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- SECTION 2 -->
+    <mxCell id="sec2"
+      value="2. RL Controller (EC2)"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e8ff;strokeColor=#a855f7;fontSize=20;fontStyle=1;"
+      vertex="1" parent="1">
+      <mxGeometry x="860" y="80" width="760" height="500" as="geometry"/>
+    </mxCell>
+
+    <!-- State -->
+    <mxCell id="state"
+      value="State Collector&#xa;Jenkins API + AWS SDK"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#8b5cf6;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="920" y="140" width="220" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- Mask -->
+    <mxCell id="mask"
+      value="Action Mask&#xa;121 valid actions"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#faf5ff;strokeColor=#a855f7;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="1180" y="140" width="220" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- Guard -->
+    <mxCell id="guard"
+      value="Safety Guard&#xa;rate / budget / kill switch"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#ef4444;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="1430" y="140" width="220" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- Inference -->
+    <mxCell id="infer"
+      value="ONNX Inference&#xa;argmax(Q * mask)"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ede9fe;strokeColor=#8b5cf6;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="1080" y="320" width="240" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- Executor -->
+    <mxCell id="exec"
+      value="Action Executor&#xa;PROVISION / RELEASE"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#22c55e;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="1390" y="320" width="240" height="100" as="geometry"/>
+    </mxCell>
+
+    <!-- Registry -->
+    <mxCell id="registry"
+      value="Agent Registry&#xa;spot-worker list"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecfccb;strokeColor=#65a30d;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="1390" y="460" width="240" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- SECTION 3 -->
+    <mxCell id="sec3"
+      value="3. AWS Infrastructure"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dcfce7;strokeColor=#22c55e;fontSize=20;fontStyle=1;"
+      vertex="1" parent="1">
+      <mxGeometry x="40" y="650" width="760" height="320" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="spot"
+      value="EC2 Spot Fleet"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#22c55e;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="80" y="740" width="220" height="90" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="od"
+      value="EC2 On-Demand"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="350" y="740" width="220" height="90" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="sqs"
+      value="SQS Queue"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dbeafe;strokeColor=#3b82f6;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="620" y="740" width="180" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- SECTION 4 -->
+    <mxCell id="sec4"
+      value="4. Observability &amp; CI/CD"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontSize=20;fontStyle=1;"
+      vertex="1" parent="1">
+      <mxGeometry x="860" y="650" width="760" height="320" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="prom"
+      value="Prometheus"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#ef4444;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="920" y="740" width="180" height="90" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="graf"
+      value="Grafana"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fee2e2;strokeColor=#f97316;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="1160" y="740" width="180" height="90" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="jenkins"
+      value="Jenkins CI"
+      style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontSize=16;"
+      vertex="1" parent="1">
+      <mxGeometry x="1400" y="740" width="180" height="90" as="geometry"/>
+    </mxCell>
+
+    <!-- EDGES -->
+    <mxCell id="e1" edge="1" parent="1" source="github" target="runpod"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e2" edge="1" parent="1" source="gym" target="dqn"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e3" edge="1" parent="1" source="dqn" target="mlflow"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e4" edge="1" parent="1" source="dqn" target="onnx"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#22c55e;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e5" edge="1" parent="1" source="onnx" target="infer"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=3;strokeColor=#22c55e;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e6" edge="1" parent="1" source="state" target="infer"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#8b5cf6;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e7" edge="1" parent="1" source="mask" target="infer"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2;strokeColor=#8b5cf6;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e8" edge="1" parent="1" source="infer" target="exec"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=3;strokeColor=#22c55e;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+    <mxCell id="e9" edge="1" parent="1" source="exec" target="registry"
+      style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;dashed=1;strokeWidth=2;">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+
+  </root>
+</mxGraphModel>
+```
+
+  </diagram>
+</mxfile>
