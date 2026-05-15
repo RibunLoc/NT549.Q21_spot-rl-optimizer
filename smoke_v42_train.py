@@ -15,6 +15,15 @@ from envs.instance_catalog import STATE_DIM
 from envs.action_schema import N_ACTIONS
 from agents.dqn_agent import DQNAgent
 
+# v42 = v41 with finer time resolution (5min instead of 15min).
+# Reward & workload coefficients = v41 main branch (NOT env defaults!).
+# Items scaled to keep SAME wallclock semantics across step_minutes:
+#   - MAX_STEPS:        672 @ 15min  -> 2016 @ 5min (1 week wallclock)
+#   - cooldown_steps:   4 @ 15min    -> 12 @ 5min   (60min wallclock)
+#   - workload uses *_per_hour / *_hours keys so env auto-divides by steps_per_hour
+# Agent hyperparams: epsilon_decay/target_update count gradient steps, which scale
+# x3 because there are 3x more env steps per episode -> 3x more grad steps.
+
 STEP_MINUTES = 5
 STEPS_PER_HOUR = 12
 MAX_STEPS = 2016
@@ -24,21 +33,31 @@ SCENARIOS = {
     'spike':         'data/processed/multipool_spike.csv',
     'az_divergence': 'data/processed/multipool_az_divergence.csv',
 }
+# v41 workload (base_arrival_rate=10 jobs/15min step = 40/hour, duration=3 steps@15min = 45min):
 WORKLOAD_CFG = {
     'base_arrival_rate_per_hour': 40.0,
     'peak_multiplier': 1.4,
-    'avg_job_duration_hours': 3.0,
+    'avg_job_duration_hours': 0.75,
     'spike_probability': 0.02,
     'spike_multiplier': 2.0,
 }
+# v41 reward (full set from main branch). Only cooldown_steps rescaled.
 REWARD_CFG = {
-    'sla_penalty': 5.5, 'interrupt_penalty': 0.1,
-    'convert_to_od_penalty': 0.4, 'convert_to_spot_penalty': 0.1,
-    'rebalance_penalty': 0.8, 'concentration_penalty': 0.05,
-    'concentration_threshold': 0.8, 'overprovision_penalty': 0.02,
-    'fleet_size_penalty': 0.0025, 'idle_fleet_penalty': 0.015,
-    'empty_fleet_penalty': 1.0, 'cooldown_steps': 12,
-    'provision_spot_bonus': 0.9, 'sla_bonus': 1.0, 'sla_bonus_threshold': 0.95,
+    'sla_penalty':              5.5,
+    'interrupt_penalty':        0.1,
+    'convert_to_od_penalty':    0.4,
+    'convert_to_spot_penalty':  0.1,
+    'rebalance_penalty':        0.8,
+    'concentration_penalty':    0.05,
+    'concentration_threshold':  0.8,
+    'overprovision_penalty':    0.02,
+    'fleet_size_penalty':       0.0025,
+    'idle_fleet_penalty':       0.015,
+    'empty_fleet_penalty':      1.0,
+    'cooldown_steps':           12,   # v41: 4 steps @ 15min = 60min wallclock
+    'provision_spot_bonus':     0.9,
+    'sla_bonus':                1.0,
+    'sla_bonus_threshold':      0.95,
 }
 
 env = MixedScenarioEnv(
@@ -49,13 +68,17 @@ env = MixedScenarioEnv(
 )
 env._loss_alpha = 0.0
 
+# Agent: same as v41 (lr/gamma/batch/buffer/network unchanged).
+# epsilon_decay & target_update count GRADIENT steps (= env_steps after warmup).
+# v42 has 3x env_steps/ep -> scale both by 3 to preserve per-episode exploration.
 agent = DQNAgent(
     state_dim=STATE_DIM, action_dim=N_ACTIONS,
     hidden_dim=512, network_type='factored',
     learning_rate=2e-5, gamma=0.99,
     batch_size=512, buffer_size=500_000,
-    epsilon_start=1.0, epsilon_end=0.08, epsilon_decay=1_350_000,
-    target_update_freq=24_000,
+    epsilon_start=1.0, epsilon_end=0.08,
+    epsilon_decay=1_350_000,    # v41: 450_000 grad steps -> v42: x3 = 1_350_000
+    target_update_freq=24_000,  # v41: 8_000 grad steps -> v42: x3 = 24_000
     use_per=True, per_alpha=0.5, per_beta_start=0.5,
     device='cpu',
 )

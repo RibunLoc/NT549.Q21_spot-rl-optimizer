@@ -191,70 +191,99 @@ print(f"Saved: action_space_structure.png")
 #   idle_fleet_penalty=0.02
 #   empty_fleet_penalty=0.5 (per pending job, capped 10)
 #   provision_spot_bonus=0.8
-fig, ax = plt.subplots(figsize=(11, 5.5))
-reward_parts = [
-    ("Savings\n(baseline OD\n- actual cost)", None,     "#4CAF50", "main"),
-    ("Provision Spot\nBonus",                 +0.8,     "#8BC34A", "bonus"),
-    ("SLA Bonus\n(SLA $\\geq$ 0.93)",         +0.5,     "#AED581", "bonus"),
-    ("SLA Penalty\n(per failed job)",         -3.5,     "#F44336", "pen"),
-    ("Rebalance\nPenalty",                    -0.8,     "#FF7043", "pen"),
-    ("Empty Fleet\nPenalty",                  -0.5,     "#E64A19", "pen"),
-    ("Convert to Spot\nPenalty",              -0.5,     "#FF9800", "pen"),
-    ("Convert to OD\nPenalty",                -0.4,     "#FFA726", "pen"),
-    ("Over-provision\nPenalty",               -0.3,     "#FFB74D", "pen"),
-    ("Interrupt\nPenalty",                    -0.1,     "#FFCC80", "pen"),
-    ("Concentration\nPenalty",                -0.05,    "#9C27B0", "pen"),
-    ("Idle Fleet\nPenalty",                   -0.02,    "#607D8B", "pen"),
-    ("Fleet Size\nPenalty",                   -0.01,    "#90A4AE", "pen"),
-]
-labels_r = [p[0] for p in reward_parts]
-vals_r   = [p[1] if p[1] is not None else 0 for p in reward_parts]
-colors_r = [p[2] for p in reward_parts]
-kinds    = [p[3] for p in reward_parts]
-
-x = np.arange(len(labels_r))
-bars = ax.bar(x, vals_r, color=colors_r, edgecolor="white", linewidth=0.5)
-# Mark "Savings" as variable (hatched)
-bars[0].set_hatch("//")
-bars[0].set_edgecolor("#2E7D32")
-bars[0].set_linewidth(1.5)
-ax.text(0, 0.15, "variable\n(env-driven)", ha="center", va="bottom",
-        fontsize=8, fontweight="bold", color="#2E7D32")
-
-ax.set_xticks(x)
-ax.set_xticklabels(labels_r, fontsize=8, rotation=0)
-ax.set_ylabel("Coefficient value", fontsize=10)
-ax.set_title("Reward Function Components (v41 default coefficients)",
-             fontsize=12, fontweight="bold", pad=10)
-ax.axhline(0, color="black", linewidth=0.8)
-ax.grid(axis="y", alpha=0.3)
-ax.set_ylim(-4.0, 1.5)
-
-for bar, val, kind in zip(bars, vals_r, kinds):
-    if kind == "main":
-        continue
-    ypos = val + 0.08 if val > 0 else val - 0.15
-    ax.text(bar.get_x() + bar.get_width()/2, ypos,
-            f"{val:+.2f}" if abs(val) >= 0.1 else f"{val:+.3f}",
-            ha="center", va="bottom" if val > 0 else "top",
-            fontsize=7.5, fontweight="bold")
-
-# Legend explaining
 import matplotlib.patches as mpatches
-handles = [
-    mpatches.Patch(color="#4CAF50", label="Main reward signal (env-driven)"),
-    mpatches.Patch(color="#8BC34A", label="Bonus (positive shaping)"),
-    mpatches.Patch(color="#F44336", label="Penalty (negative shaping)"),
+
+# Split into 3 panels: bonuses (left), small penalties (mid), large penalties (right)
+fig = plt.figure(figsize=(13, 6.2))
+gs = fig.add_gridspec(2, 3, height_ratios=[1, 0.08], hspace=0.45, wspace=0.32)
+ax_bonus = fig.add_subplot(gs[0, 0])
+ax_pen_small = fig.add_subplot(gs[0, 1])
+ax_pen_big = fig.add_subplot(gs[0, 2])
+
+fig.suptitle("Reward Function Components (v41 default coefficients)",
+             fontsize=13, fontweight="bold", y=0.98)
+
+# Panel 1: Bonuses + Savings reference
+bonus_items = [
+    ("Savings\n(env-driven)",           1.0, "#4CAF50", True),
+    ("Provision Spot\nBonus",           0.8, "#8BC34A", False),
+    ("SLA Bonus\n(SLA $\\geq$ 0.93)",   0.5, "#AED581", False),
 ]
-ax.legend(handles=handles, loc="lower left", fontsize=8.5, framealpha=0.95)
+labels_b = [p[0] for p in bonus_items]
+vals_b   = [p[1] for p in bonus_items]
+colors_b = [p[2] for p in bonus_items]
+x_b = np.arange(len(labels_b))
+bars_b = ax_bonus.bar(x_b, vals_b, color=colors_b, edgecolor="white", linewidth=0.5, width=0.6)
+bars_b[0].set_hatch("//")
+bars_b[0].set_edgecolor("#2E7D32")
+bars_b[0].set_linewidth(1.5)
+for bar, val, item in zip(bars_b, vals_b, bonus_items):
+    label = "variable" if item[3] else f"+{val:.2f}"
+    ax_bonus.text(bar.get_x() + bar.get_width()/2, val + 0.04, label,
+                  ha="center", va="bottom", fontsize=9, fontweight="bold",
+                  color="#2E7D32" if item[3] else "#333")
+ax_bonus.set_xticks(x_b)
+ax_bonus.set_xticklabels(labels_b, fontsize=8.5)
+ax_bonus.set_ylabel("Coefficient value", fontsize=9)
+ax_bonus.set_title("Positive: Savings + Bonuses", fontsize=10.5, fontweight="bold", color="#2E7D32")
+ax_bonus.axhline(0, color="black", linewidth=0.8)
+ax_bonus.grid(axis="y", alpha=0.3)
+ax_bonus.set_ylim(0, 1.4)
 
-# Footer note
-ax.text(0.5, -3.85,
-        "Formula:  $R_t = \\mathrm{savings}_t + \\sum \\mathrm{bonus}_i - \\sum \\mathrm{penalty}_j$    "
-        "where $\\mathrm{savings}_t = \\mathrm{baseline\\_OD\\_cost}_t - \\mathrm{actual\\_cost}_t$",
-        fontsize=9, color="#333")
+# Panel 2: Small penalties (|coef| <= 0.8)
+small_pen = [
+    ("Rebalance",       -0.80, "#FF7043"),
+    ("Empty Fleet",     -0.50, "#E64A19"),
+    ("Convert to Spot", -0.50, "#FF9800"),
+    ("Convert to OD",   -0.40, "#FFA726"),
+    ("Over-provision",  -0.30, "#FFB74D"),
+    ("Interrupt",       -0.10, "#FFCC80"),
+    ("Concentration",   -0.05, "#9C27B0"),
+    ("Idle Fleet",      -0.02, "#607D8B"),
+    ("Fleet Size",      -0.01, "#90A4AE"),
+]
+labels_s = [p[0] for p in small_pen]
+vals_s   = [p[1] for p in small_pen]
+colors_s = [p[2] for p in small_pen]
+x_s = np.arange(len(labels_s))
+bars_s = ax_pen_small.barh(x_s, vals_s, color=colors_s, edgecolor="white", linewidth=0.5, height=0.7)
+for bar, val in zip(bars_s, vals_s):
+    label = f"{val:+.2f}" if abs(val) >= 0.1 else f"{val:+.3f}"
+    ax_pen_small.text(val - 0.02, bar.get_y() + bar.get_height()/2, label,
+                       ha="right", va="center", fontsize=8.5, fontweight="bold")
+ax_pen_small.set_yticks(x_s)
+ax_pen_small.set_yticklabels(labels_s, fontsize=8.5)
+ax_pen_small.invert_yaxis()
+ax_pen_small.set_xlabel("Coefficient", fontsize=9)
+ax_pen_small.set_title("Small penalties ($|c| \\leq 0.8$)", fontsize=10.5, fontweight="bold", color="#E65100")
+ax_pen_small.axvline(0, color="black", linewidth=0.8)
+ax_pen_small.grid(axis="x", alpha=0.3)
+ax_pen_small.set_xlim(-1.0, 0.05)
 
-plt.tight_layout()
+# Panel 3: Dominant SLA Penalty
+big_pen = [("SLA Penalty\n(per failed job)", -3.50, "#D32F2F")]
+ax_pen_big.bar([0], [-3.5], color="#D32F2F", edgecolor="#B71C1C", linewidth=1.5, width=0.5)
+ax_pen_big.text(0, -3.5 - 0.15, "-3.50", ha="center", va="top", fontsize=12, fontweight="bold", color="#B71C1C")
+ax_pen_big.text(0, -1.5, "Dominant penalty\nmultiplied by\n# of failed jobs\nper step",
+                ha="center", va="center", fontsize=9, color="#B71C1C",
+                bbox=dict(boxstyle="round,pad=0.4", facecolor="#FFEBEE", edgecolor="#D32F2F"))
+ax_pen_big.set_xticks([0])
+ax_pen_big.set_xticklabels(["SLA Penalty"], fontsize=9.5, fontweight="bold")
+ax_pen_big.set_title("Dominant penalty (SLA)", fontsize=10.5, fontweight="bold", color="#B71C1C")
+ax_pen_big.axhline(0, color="black", linewidth=0.8)
+ax_pen_big.set_ylim(-4.2, 0.3)
+ax_pen_big.grid(axis="y", alpha=0.3)
+ax_pen_big.set_xlim(-0.6, 0.6)
+
+# Footer with formula (separate row, no overlap)
+ax_footer = fig.add_subplot(gs[1, :])
+ax_footer.axis("off")
+ax_footer.text(0.5, 0.5,
+    "Formula:   $R_t = \\mathrm{savings}_t + \\sum_i \\mathrm{bonus}_i - \\sum_j \\mathrm{penalty}_j$"
+    "   where   $\\mathrm{savings}_t = \\mathrm{baseline\\_OD\\_cost}_t - \\mathrm{actual\\_cost}_t$",
+    ha="center", va="center", fontsize=10.5, color="#1A237E",
+    bbox=dict(boxstyle="round,pad=0.5", facecolor="#E8EAF6", edgecolor="#3949AB"))
+
 out = os.path.join(SYS_DIR, "reward_components.png")
 plt.savefig(out)
 plt.close()
