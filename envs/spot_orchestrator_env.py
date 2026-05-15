@@ -126,7 +126,10 @@ class SpotOrchestratorEnv(gym.Env):
 
         # Reward config — rescale xuống cùng magnitude với savings ($0.1-2/step)
         # để gradient không bị SLA penalty dominate.
+        # v42: per-step penalty/bonus terms scale by step_hours/0.25 so episode
+        # totals stay constant across step_minutes (15-min legacy is the anchor).
         rc = reward_config or {}
+        _step_scale = 1.0 if self.step_minutes == 15 else (self.step_hours / 0.25)
         # v35: tăng sla_penalty 2.0→3.5 để counter slow policy degradation (SLA drift ~0.88)
         # v34 dùng 2.0 quá nhẹ: agent học tiết kiệm cost > duy trì SLA qua 5000 ep
         self.sla_penalty_coeff = rc.get('sla_penalty', 3.5)
@@ -143,24 +146,24 @@ class SpotOrchestratorEnv(gym.Env):
             self.convert_to_spot_penalty_coeff = rc.get('convert_to_spot_penalty', mp * 0.75)
             self.rebalance_penalty_coeff       = rc.get('rebalance_penalty',       mp * 2.0)
         self.migration_penalty_coeff = self.rebalance_penalty_coeff
-        self.concentration_penalty_coeff = rc.get('concentration_penalty', 0.05)
+        self.concentration_penalty_coeff = rc.get('concentration_penalty', 0.05) * _step_scale
         self.concentration_threshold = rc.get('concentration_threshold', 0.8)
         # v13-fix: penalty cho over-provision (fleet > workload cần)
         # Mỗi vCPU-instance idle bị phạt theo OD price/h → khuyến khích shrink fleet
-        self.overprovision_penalty_coeff = rc.get('overprovision_penalty', 0.3)
+        self.overprovision_penalty_coeff = rc.get('overprovision_penalty', 0.3) * _step_scale
         # v14-fix: per-step fleet size penalty
         # v39: giảm 0.03→0.01 vì 0.03×672 = 20.16/ep áp đảo savings → agent over-release
         # Đủ mạnh để chống bloat, không quá mạnh để bias toward RELEASE.
-        self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.01)
+        self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.01) * _step_scale
         # v35: giảm idle_fleet_penalty 0.05→0.02 để agent không sợ giữ buffer fleet
-        self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.02)
+        self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.02) * _step_scale
         # v34: empty fleet penalty — phạt khi pending>0 mà fleet=0.
         # v39: scale theo pending (capped 10) để agent thấy queue càng dài càng tệ
         # khi không có capacity. Tránh Q-diverge bằng cap 10 thay vì raw pending.
-        self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.5)
+        self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.5) * _step_scale
         # v30: SLA shaping bonus — thưởng mỗi step khi SLA window đang tốt
         # v35: threshold 0.95→0.93 để agent dễ đạt bonus hơn (encourage maintain SLA)
-        self.sla_bonus_coeff      = rc.get('sla_bonus', 0.5)
+        self.sla_bonus_coeff      = rc.get('sla_bonus', 0.5) * _step_scale
         self.sla_bonus_threshold  = rc.get('sla_bonus_threshold', 0.93)
         # Cooldown: số steps mỗi pool bị locked sau PROVISION/CONVERT/REBALANCE
         # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh
@@ -584,17 +587,22 @@ class SpotOrchestratorEnv(gym.Env):
         # 7. Queue wait tracking
         self.queue_wait_accumulator += self.pending_jobs
 
-        # 8. SLA window
+        # 8. SLA window — span ~2.5h regardless of step resolution.
+        # v41 (15min): 10 steps = 2.5h. v42 (5min): 30 steps = 2.5h.
+        sla_window_len = max(10, int(round(2.5 * self.steps_per_hour)))
         self.sla_window.append((self.step_completed_jobs, self.step_failed_jobs))
-        if len(self.sla_window) > 10:
+        if len(self.sla_window) > sla_window_len:
             self.sla_window.pop(0)
 
-        # Track interrupt and pending history for new state features
+        # Track interrupt and pending history. Scale similarly so signals span
+        # the same wallclock window across step_minutes.
+        interrupt_hist_len = max(10, int(round(2.5 * self.steps_per_hour)))
+        pending_hist_len = max(5, int(round(1.25 * self.steps_per_hour)))
         self.interrupt_history.append(self.step_interruptions)
-        if len(self.interrupt_history) > 10:
+        if len(self.interrupt_history) > interrupt_hist_len:
             self.interrupt_history.pop(0)
         self.pending_history.append(self.pending_jobs)
-        if len(self.pending_history) > 5:
+        if len(self.pending_history) > pending_hist_len:
             self.pending_history.pop(0)
 
         # 9. Compute step cost

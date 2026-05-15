@@ -41,6 +41,32 @@ for k in range(env5.steps_per_hour):
 # After steps_per_hour steps, hour feature should advance by 1
 print(f'[v42 5min] after {env5.steps_per_hour} steps, current_step={env5.current_step}, hour bucket={(env5.current_step // env5.steps_per_hour) % 24}')
 
+# verify reward coeff scaling
+print()
+print(f'[v41] fleet_size={env15.fleet_size_penalty_coeff:.4f} idle_fleet={env15.idle_fleet_penalty_coeff:.4f} sla_bonus={env15.sla_bonus_coeff:.4f}')
+print(f'[v42] fleet_size={env5.fleet_size_penalty_coeff:.4f} idle_fleet={env5.idle_fleet_penalty_coeff:.4f} sla_bonus={env5.sla_bonus_coeff:.4f}')
+print(f'[v42] sla_window cap will be {max(10, int(round(2.5 * env5.steps_per_hour)))} (vs {max(10, int(round(2.5 * env15.steps_per_hour)))} for v41)')
+
+# full episode SLA comparison: run 1 random-action episode each, verify reward magnitudes comparable
+np.random.seed(0)
+def run_ep(env):
+    obs, info = env.reset()
+    total_r = 0; total_c = 0
+    while True:
+        a = np.random.randint(0, 121)
+        obs, r, term, trunc, info = env.step(a)
+        total_r += r; total_c += info['step_cost']
+        if term or trunc: break
+    return total_r, total_c, info.get('cost', 0), info.get('sla_compliance', 0)
+
+env15b = SpotOrchestratorEnv(data_path=CSV, max_steps=672, workload_config={'base_arrival_rate': 1.25, 'peak_multiplier': 1.4, 'avg_job_duration': 12}, seed=99)
+env5b = SpotOrchestratorEnv(data_path=CSV, max_steps=2016, workload_config={'base_arrival_rate_per_hour': 5.0, 'peak_multiplier': 1.4, 'avg_job_duration_hours': 3.0}, seed=99, step_minutes=5)
+r15, sc15, c15, s15 = run_ep(env15b)
+r5, sc5, c5, s5 = run_ep(env5b)
+print(f'[v41 random-act ep] reward={r15:.1f} sum_step_cost={sc15:.1f} cost={c15:.1f} SLA={s15:.1%}')
+print(f'[v42 random-act ep] reward={r5:.1f} sum_step_cost={sc5:.1f} cost={c5:.1f} SLA={s5:.1%}')
+print('  -> reward magnitudes should be similar order (random-act so noisy, but not 3x off)')
+
 print('OK')
 """
 r = subprocess.run([r"venv\Scripts\python.exe", "-c", script], capture_output=True, text=True, timeout=120)
