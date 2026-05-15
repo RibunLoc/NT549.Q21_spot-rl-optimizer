@@ -126,10 +126,10 @@ class SpotOrchestratorEnv(gym.Env):
 
         # Reward config — rescale xuống cùng magnitude với savings ($0.1-2/step)
         # để gradient không bị SLA penalty dominate.
-        # v42: per-step penalty/bonus terms scale by step_hours/0.25 so episode
-        # totals stay constant across step_minutes (15-min legacy is the anchor).
+        # v42 note: step_cost is NOT scaled by step_hours, so per-step terms also
+        # stay unscaled. Episode totals naturally grow 3x with step_minutes=5
+        # (3x more steps), and savings grow 3x too — the balance is preserved.
         rc = reward_config or {}
-        _step_scale = 1.0 if self.step_minutes == 15 else (self.step_hours / 0.25)
         # v35: tăng sla_penalty 2.0→3.5 để counter slow policy degradation (SLA drift ~0.88)
         # v34 dùng 2.0 quá nhẹ: agent học tiết kiệm cost > duy trì SLA qua 5000 ep
         self.sla_penalty_coeff = rc.get('sla_penalty', 3.5)
@@ -146,24 +146,24 @@ class SpotOrchestratorEnv(gym.Env):
             self.convert_to_spot_penalty_coeff = rc.get('convert_to_spot_penalty', mp * 0.75)
             self.rebalance_penalty_coeff       = rc.get('rebalance_penalty',       mp * 2.0)
         self.migration_penalty_coeff = self.rebalance_penalty_coeff
-        self.concentration_penalty_coeff = rc.get('concentration_penalty', 0.05) * _step_scale
+        self.concentration_penalty_coeff = rc.get('concentration_penalty', 0.05)
         self.concentration_threshold = rc.get('concentration_threshold', 0.8)
         # v13-fix: penalty cho over-provision (fleet > workload cần)
         # Mỗi vCPU-instance idle bị phạt theo OD price/h → khuyến khích shrink fleet
-        self.overprovision_penalty_coeff = rc.get('overprovision_penalty', 0.3) * _step_scale
+        self.overprovision_penalty_coeff = rc.get('overprovision_penalty', 0.3)
         # v14-fix: per-step fleet size penalty
         # v39: giảm 0.03→0.01 vì 0.03×672 = 20.16/ep áp đảo savings → agent over-release
         # Đủ mạnh để chống bloat, không quá mạnh để bias toward RELEASE.
-        self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.01) * _step_scale
+        self.fleet_size_penalty_coeff = rc.get('fleet_size_penalty', 0.01)
         # v35: giảm idle_fleet_penalty 0.05→0.02 để agent không sợ giữ buffer fleet
-        self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.02) * _step_scale
+        self.idle_fleet_penalty_coeff = rc.get('idle_fleet_penalty', 0.02)
         # v34: empty fleet penalty — phạt khi pending>0 mà fleet=0.
         # v39: scale theo pending (capped 10) để agent thấy queue càng dài càng tệ
         # khi không có capacity. Tránh Q-diverge bằng cap 10 thay vì raw pending.
-        self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.5) * _step_scale
+        self.empty_fleet_penalty_coeff = rc.get('empty_fleet_penalty', 0.5)
         # v30: SLA shaping bonus — thưởng mỗi step khi SLA window đang tốt
         # v35: threshold 0.95→0.93 để agent dễ đạt bonus hơn (encourage maintain SLA)
-        self.sla_bonus_coeff      = rc.get('sla_bonus', 0.5) * _step_scale
+        self.sla_bonus_coeff      = rc.get('sla_bonus', 0.5)
         self.sla_bonus_threshold  = rc.get('sla_bonus_threshold', 0.93)
         # Cooldown: số steps mỗi pool bị locked sau PROVISION/CONVERT/REBALANCE
         # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh
@@ -606,17 +606,18 @@ class SpotOrchestratorEnv(gym.Env):
             self.pending_history.pop(0)
 
         # 9. Compute step cost
-        # Legacy v41 (step_minutes=15) keeps `count × $/h per step` semantics so
-        # eval numbers stay comparable. Other resolutions scale by step_hours/0.25
-        # so cost magnitudes match v41 across the same wallclock window.
-        cost_scale = 1.0 if self.step_minutes == 15 else (self.step_hours / 0.25)
+        # Legacy semantics (v41): `count × $/h per step`, not scaled by step_hours.
+        # The reward function's baseline_od_cost uses the same convention, so
+        # savings = baseline - step_cost stays balanced. Scaling step_cost alone
+        # would inflate savings by 1/step_scale and blow up reward magnitudes.
+        # Episode cost ends up proportional to step count; that is the correct
+        # behavior since v42 simulates 3x more steps per wallclock week.
         self.step_cost = 0.0
         for (t_idx, az_idx), pool in self.pools.items():
             spot_price = self.market_sim.get_pool_price(t_idx, az_idx)
             od_price = INSTANCE_TYPES[t_idx].ondemand_price
             self.step_cost += pool.spot_count * spot_price
             self.step_cost += pool.ondemand_count * od_price
-        self.step_cost *= cost_scale
         self.total_cost += self.step_cost
 
         # 10. Migrate-back tracking
