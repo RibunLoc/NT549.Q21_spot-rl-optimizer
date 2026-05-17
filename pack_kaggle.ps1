@@ -39,7 +39,8 @@ with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as zf:
                 zf.write(abs_path, arcname)
         print(f'  [+] {d}/')
 
-    # Data processed — per-scenario parquet
+    # Data processed — per-scenario CSV. If these files are present, Kaggle can
+    # skip DVC entirely and train offline from the uploaded dataset.
     processed = os.path.join(ROOT, 'data', 'processed')
     for f in sorted(os.listdir(processed)):
         if f.startswith('multipool_') and f.endswith('.csv'):
@@ -47,6 +48,14 @@ with zipfile.ZipFile(OUT, 'w', zipfile.ZIP_DEFLATED) as zf:
             arcname  = f'data/processed/{f}'
             zf.write(abs_path, arcname)
             print(f'  [+] {arcname}  ({os.path.getsize(abs_path)/1024/1024:.1f} MB)')
+
+    # DVC metadata — needed only when processed CSV files are not bundled or need refresh.
+    dvc_items = ['.dvc/config', '.dvcignore', 'data/processed.dvc']
+    for item in dvc_items:
+        abs_path = os.path.join(ROOT, item)
+        if os.path.exists(abs_path):
+            zf.write(abs_path, item.replace(os.sep, '/'))
+            print(f'  [+] {item}')
 
     # Notebook
     zf.write(os.path.join(ROOT, 'notebooks', 'kaggle_train.ipynb'), 'notebooks/kaggle_train.ipynb')

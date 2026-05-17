@@ -33,18 +33,26 @@ SCENARIOS = {
     "az_divergence": "data/processed/multipool_az_divergence.csv",
 }
 
-WORKLOAD_CFG = {
-    "base_arrival_rate": 15.0,
+# v41 training dùng step_minutes=15 (672 steps = 1 tuần).
+# Eval phải khớp để episode chạy đủ 1 tuần workload.
+# Default workload:
+#   base_arrival_rate = 3.75  (= 15 job/h ÷ 4 vì step 15 phút)
+#   avg_job_duration  = 12    (= 3h × 4 vì step 15 phút)
+# Có thể override qua CLI để chạy ablation (vd: CI/CD job 15 phút thì duration=1).
+DEFAULT_WORKLOAD_CFG = {
+    "base_arrival_rate": 3.75,
     "peak_multiplier":   2.0,
-    "avg_job_duration":  3,
+    "avg_job_duration":  12,
 }
 
 
-def make_env(scenario: str, seed: int = 0) -> SpotOrchestratorEnv:
+def make_env(scenario: str, seed: int = 0,
+             workload_cfg: dict = None,
+             max_steps: int = 672) -> SpotOrchestratorEnv:
     return SpotOrchestratorEnv(
         data_path=SCENARIOS[scenario],
-        max_steps=168,
-        workload_config=WORKLOAD_CFG,
+        max_steps=max_steps,
+        workload_config=workload_cfg or DEFAULT_WORKLOAD_CFG,
         seed=seed,
     )
 
@@ -112,12 +120,14 @@ def run_episode(env, agent, use_mask: bool = False) -> dict:
     }
 
 
-def evaluate(agent, scenario: str, n_episodes: int, use_mask: bool = False) -> dict:
+def evaluate(agent, scenario: str, n_episodes: int, use_mask: bool = False,
+             workload_cfg: dict = None, max_steps: int = 672) -> dict:
     results = []
     ac_total = np.zeros(N_ACTIONS, dtype=int)
 
     for ep in range(n_episodes):
-        env = make_env(scenario, seed=ep * 7 + 42)
+        env = make_env(scenario, seed=ep * 7 + 42,
+                       workload_cfg=workload_cfg, max_steps=max_steps)
         r   = run_episode(env, agent, use_mask)
         results.append(r)
         ac_total += r["action_counts"]
@@ -282,13 +292,37 @@ def main():
     parser.add_argument("--episodes",   type=int, default=30)
     parser.add_argument("--output-dir", default="results/kaggle/eval")
     parser.add_argument("--device",     default="cpu")
+    # Workload knobs — default khớp training v41 (3h job, 15 job/h).
+    # Để eval khớp training v42 (in-distribution), dùng:
+    #   --base-arrival-rate 10 --avg-job-duration 3 --peak-multiplier 1.4
+    #   --spike-probability 0.02 --spike-multiplier 2.0
+    parser.add_argument("--max-steps",          type=int,   default=672,
+                        help="Số step/episode (default 672)")
+    parser.add_argument("--base-arrival-rate",  type=float, default=3.75,
+                        help="Job/step trung bình")
+    parser.add_argument("--peak-multiplier",    type=float, default=2.0)
+    parser.add_argument("--avg-job-duration",   type=int,   default=12,
+                        help="Số step trung bình của 1 job")
+    parser.add_argument("--spike-probability",  type=float, default=0.02,
+                        help="Xác suất spike workload mỗi step")
+    parser.add_argument("--spike-multiplier",   type=float, default=2.0,
+                        help="Hệ số nhân arrival rate khi có spike")
     args = parser.parse_args()
+
+    workload_cfg = {
+        "base_arrival_rate": args.base_arrival_rate,
+        "peak_multiplier":   args.peak_multiplier,
+        "avg_job_duration":  args.avg_job_duration,
+        "spike_probability": args.spike_probability,
+        "spike_multiplier":  args.spike_multiplier,
+    }
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Model: {args.model}")
     print(f"Episodes per scenario: {args.episodes}")
+    print(f"max_steps={args.max_steps}, workload={workload_cfg}")
 
     dqn = load_dqn(args.model, device=args.device)
 
@@ -313,7 +347,8 @@ def main():
             if hasattr(agent, "reset"):
                 agent.reset()
             print(f"  [{name}] evaluating {args.episodes} episodes...")
-            res = evaluate(agent, scn, args.episodes, use_mask)
+            res = evaluate(agent, scn, args.episodes, use_mask,
+                           workload_cfg=workload_cfg, max_steps=args.max_steps)
             scn_res[name] = res
             print(f"    cost=${res['avg_cost']:.1f}±{res['std_cost']:.0f}  "
                   f"SLA={res['avg_sla']*100:.1f}%  "
