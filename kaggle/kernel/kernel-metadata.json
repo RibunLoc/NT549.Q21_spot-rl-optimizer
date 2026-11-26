@@ -1,6 +1,6 @@
 {
-  "id": "KAGGLE_USER/spot-rl-train",
-  "title": "spot-rl-train",
+  "id": "KAGGLE_USER/KERNEL_SLUG",
+  "title": "Reinforcement Learning Spot Instance AWS",
   "code_file": "kaggle_train.ipynb",
   "language": "python",
   "kernel_type": "notebook",

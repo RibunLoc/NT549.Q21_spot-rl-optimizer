@@ -31,6 +31,9 @@ permissions:
 env:
   KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
   KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+  # Slug notebook trên Kaggle — PHẢI giống train-check.yml.
+  # Title trong kaggle/kernel/kernel-metadata.json phải "slug hoá" ra đúng chuỗi này.
+  KAGGLE_KERNEL_SLUG: reinforcement-learning-spot-instance-aws
 
 jobs:
   submit:
@@ -43,8 +46,12 @@ jobs:
         with:
           python-version: "3.11"
 
+      # `six`: Kaggle CLI vẫn import nhưng không khai báo dependency
+      # → thiếu là `ModuleNotFoundError: No module named 'six'`
       - name: Install Kaggle CLI
-        run: pip install kaggle
+        run: |
+          pip install kaggle six
+          kaggle --version
 
       - name: Validate config path
         env:
@@ -56,7 +63,14 @@ jobs:
 
       - name: Refuse if a training run is still going
         run: |
-          status=$(kaggle kernels status "${KAGGLE_USERNAME}/spot-rl-train" 2>&1 || true)
+          # KHÔNG dùng `|| true`: CLI hỏng (thiếu module, sai key) phải làm workflow đỏ,
+          # chỉ bỏ qua đúng trường hợp kernel chưa tồn tại (lần submit đầu tiên).
+          if ! status=$(kaggle kernels status "${KAGGLE_USERNAME}/${KAGGLE_KERNEL_SLUG}" 2>&1); then
+            if echo "$status" | grep -qiE "404|not found"; then
+              echo "Kernel chưa tồn tại → lần đầu, sẽ tạo mới"; exit 0
+            fi
+            echo "::error::Kaggle CLI lỗi: $status"; exit 1
+          fi
           echo "Kernel status: $status"
           case "$status" in
             *RUNNING*|*QUEUED*)
@@ -68,7 +82,9 @@ jobs:
         env:
           CONFIG: ${{ inputs.config }}
         run: |
-          sed -i "s/KAGGLE_USER/${KAGGLE_USERNAME}/g" kaggle/kernel/kernel-metadata.json
+          sed -i -e "s/KAGGLE_USER/${KAGGLE_USERNAME}/g" -e "s/KERNEL_SLUG/${KAGGLE_KERNEL_SLUG}/g" \
+            kaggle/kernel/kernel-metadata.json
+          cat kaggle/kernel/kernel-metadata.json
           cp notebooks/kaggle_train.ipynb kaggle/kernel/kaggle_train.ipynb
           sed -i -e "s|__GIT_SHA__|${GITHUB_SHA}|" -e "s|__RUN_CONFIG__|${CONFIG}|" \
             kaggle/kernel/kaggle_train.ipynb
@@ -89,6 +105,6 @@ jobs:
             echo "### Đã gửi train lên Kaggle"
             echo "- Commit: \`${GITHUB_SHA}\`"
             echo "- Config: \`${CONFIG}\`"
-            echo "- Kernel: https://www.kaggle.com/code/${KAGGLE_USERNAME}/spot-rl-train"
+            echo "- Kernel: https://www.kaggle.com/code/${KAGGLE_USERNAME}/${KAGGLE_KERNEL_SLUG}"
             echo "- Theo dõi: workflow **train-check**"
           } >> "$GITHUB_STEP_SUMMARY"

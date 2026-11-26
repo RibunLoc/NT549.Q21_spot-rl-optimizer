@@ -28,6 +28,7 @@ env:
   MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
   MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
   MLFLOW_EXPERIMENT: spot-rl-generalist
+  KAGGLE_KERNEL_SLUG: reinforcement-learning-spot-instance-aws   # giống train-submit.yml
 
 jobs:
   check:
@@ -40,13 +41,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      # `six`: Kaggle CLI vẫn import nhưng không khai báo dependency
       - name: Install Kaggle CLI
-        run: pip install kaggle
+        run: pip install kaggle six
 
       - name: Kaggle kernel status
         id: status
         run: |
-          s=$(kaggle kernels status "${KAGGLE_USERNAME}/spot-rl-train" 2>&1 || true)
+          # CLI lỗi (thiếu module, sai key, mạng) → workflow đỏ, không im lặng thành "unknown"
+          if ! s=$(kaggle kernels status "${KAGGLE_USERNAME}/${KAGGLE_KERNEL_SLUG}" 2>&1); then
+            echo "::error::Kaggle CLI lỗi: $s"; exit 1
+          fi
           echo "Kernel status: $s"
           case "$s" in
             *RUNNING*|*QUEUED*)     state=running ;;
@@ -60,7 +65,7 @@ jobs:
       - name: Report failure
         if: steps.status.outputs.state == 'failed'
         run: |
-          echo "::error::Kaggle train lỗi hoặc bị cancel. Xem log: https://www.kaggle.com/code/${KAGGLE_USERNAME}/spot-rl-train"
+          echo "::error::Kaggle train lỗi hoặc bị cancel. Xem log: https://www.kaggle.com/code/${KAGGLE_USERNAME}/${KAGGLE_KERNEL_SLUG}"
           echo "Lỗi này sẽ báo lại mỗi giờ tới khi submit lần train mới."
           exit 1
 
