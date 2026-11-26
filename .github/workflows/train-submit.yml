@@ -30,7 +30,10 @@ permissions:
 
 env:
   KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
-  KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+  # Kaggle CLI 2.x xác thực bằng API token (Settings → API → Generate New Token),
+  # không còn đọc cặp KAGGLE_USERNAME/KAGGLE_KEY kiểu kaggle.json cũ.
+  # KAGGLE_USERNAME vẫn giữ để ghép đường dẫn owner/slug của notebook.
+  KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
   # Slug notebook trên Kaggle — PHẢI giống train-check.yml.
   # Title trong kaggle/kernel/kernel-metadata.json phải "slug hoá" ra đúng chuỗi này.
   KAGGLE_KERNEL_SLUG: reinforcement-learning-spot-instance-aws
@@ -59,8 +62,8 @@ jobs:
           if [[ "$KAGGLE_USERNAME" =~ [[:space:]] || -z "$KAGGLE_USERNAME" ]]; then
             echo "::error::Secret KAGGLE_USERNAME rỗng hoặc có dấu cách/xuống dòng. Tạo lại secret."; exit 1
           fi
-          if [[ "$KAGGLE_KEY" =~ [[:space:]] || -z "$KAGGLE_KEY" ]]; then
-            echo "::error::Secret KAGGLE_KEY rỗng hoặc có dấu cách/xuống dòng. Tạo lại secret."; exit 1
+          if [[ "$KAGGLE_API_TOKEN" =~ [[:space:]] || -z "$KAGGLE_API_TOKEN" ]]; then
+            echo "::error::Secret KAGGLE_API_TOKEN rỗng hoặc có dấu cách/xuống dòng. Tạo lại secret."; exit 1
           fi
           echo "Notebook của tài khoản này (cột ref = owner/slug):"
           kaggle kernels list --mine --page-size 50
