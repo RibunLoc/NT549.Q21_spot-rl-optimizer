@@ -1,0 +1,90 @@
+# v41 — tái hiện đúng cấu hình train của best_mixed_v41.pth (RunPod, commit 435e6d6,
+# notebooks/runpod_train.ipynb). Giữ nguyên CẢ CÁC LỖI để làm mốc so sánh:
+#   - lr_schedule: step  → LR chia đôi mỗi 50k grad step (checkpoint v41 có LR = 1.9e-11)
+#   - bootstrap_on_truncation: false → step cuối episode bị coi là terminal
+#   - interrupt_model: pool, cost_step_hours: 1.0, obs_version: 1, reward shaped
+# Nếu params trên MLflow của run v41 khác file này, sửa file này cho khớp.
+
+version: v41
+
+env:
+  scenarios:
+    stable: data/processed/multipool_stable.csv
+    volatile: data/processed/multipool_volatile.csv
+    spike: data/processed/multipool_spike.csv
+    az_divergence: data/processed/multipool_az_divergence.csv
+  scenario_weights: {stable: 1.0, volatile: 1.0, spike: 1.0, az_divergence: 1.0}
+  max_steps: 672          # 1 tuần, 1 step = 15 phút
+  sla_threshold: 0.95
+  seed: 42
+
+  workload:
+    base_arrival_rate: 10
+    avg_job_duration: 3
+    peak_multiplier: 1.4      # không có tác dụng: WorkloadGenerator không dùng tham số này
+    spike_probability: 0.02
+    spike_multiplier: 3.0     # notebook ghi 2.0 nhưng env cũ không truyền xuống → thực tế là 3.0
+
+  reward:
+    mode: shaped
+    sla_penalty: 5.5
+    interrupt_penalty: 0.1
+    convert_to_od_penalty: 0.4
+    convert_to_spot_penalty: 0.1
+    rebalance_penalty: 0.8
+    concentration_penalty: 0.05
+    concentration_threshold: 0.8
+    overprovision_penalty: 0.02
+    fleet_size_penalty: 0.0025
+    idle_fleet_penalty: 0.015
+    empty_fleet_penalty: 1.0
+    cooldown_steps: 4
+    provision_spot_bonus: 0.9
+    sla_bonus: 1.0
+    sla_bonus_threshold: 0.95
+
+  sim:
+    obs_version: 1
+    interrupt_model: pool
+    cost_step_hours: 1.0
+
+agent:
+  network_type: factored
+  hidden_dim: 512
+  learning_rate: 2.0e-5
+  lr_schedule: step
+  gamma: 0.99
+  batch_size: 512
+  buffer_size: 500000
+  epsilon_start: 1.0
+  epsilon_end: 0.08
+  epsilon_decay: 450000
+  target_update_freq: 8000
+  use_per: true
+  per_alpha: 0.5
+  per_beta_start: 0.5
+
+training:
+  seed: 0
+  num_episodes: 6000
+  min_episodes: 3000
+  warmup_steps: 4096
+  n_gradient_steps: 1
+  bootstrap_on_truncation: false
+  eval_every: 100
+  eval_start: 500
+  eval_episodes: 3          # mỗi scenario, seed 10000 + ep*97
+  eval_sla_gate: 0.945
+  eval_patience: 12
+  eps_gate: 0.08
+  sla_target: 0.95
+  collapse_window: 100
+  collapse_sla_stop: 0.88
+  checkpoint_every: 500
+  print_every: 10
+  log_every: 10
+
+eval:
+  episodes: 30              # mỗi scenario, seed = seed_base + ep * seed_stride
+  seed_base: 42
+  seed_stride: 7

@@ -1,13 +1,7 @@
 """
-Training script for DQN agent.
-
-Supports both single-pool (SpotInstanceEnv) and multi-pool (SpotOrchestratorEnv).
+Training script for DQN agent (multi-pool SpotOrchestratorEnv).
 
 Usage:
-    # Single-pool (legacy)
-    python train.py --config configs/dqn_default.yaml --experiment-name dqn_stable
-
-    # Multi-pool
     python train.py --config configs/multi_pool_stable.yaml --experiment-name mp_stable
 """
 
@@ -40,31 +34,15 @@ def load_config(config_path: str) -> dict:
 
 
 def create_env(env_config: dict):
-    """Create environment based on config type."""
-    env_type = env_config.get('type', 'single')
-
-    if env_type == 'multi_pool':
-        from envs.spot_orchestrator_env import SpotOrchestratorEnv
-        env = SpotOrchestratorEnv(
-            data_path=env_config['data_path'],
-            max_steps=env_config.get('max_steps', 168),
-            sla_threshold=env_config.get('sla_threshold', 0.95),
-            workload_config=env_config.get('workload', {}),
-            reward_config=env_config.get('reward', {}),
-        )
-    else:
-        from envs.spot_env import SpotInstanceEnv
-        env = SpotInstanceEnv(
-            data_path=env_config['data_path'],
-            max_steps=env_config.get('max_steps', 1000),
-            sla_threshold=env_config.get('sla_threshold', 0.95),
-            spot_capacity=env_config.get('spot_capacity', 20),
-            ondemand_capacity=env_config.get('ondemand_capacity', 10),
-            workload_config=env_config.get('workload', {}),
-            cost_config=env_config.get('cost', {}),
-        )
-
-    return env
+    """Create multi-pool SpotOrchestratorEnv."""
+    from envs.spot_orchestrator_env import SpotOrchestratorEnv
+    return SpotOrchestratorEnv(
+        data_path=env_config['data_path'],
+        max_steps=env_config.get('max_steps', 672),
+        sla_threshold=env_config.get('sla_threshold', 0.95),
+        workload_config=env_config.get('workload', {}),
+        reward_config=env_config.get('reward', {}),
+    )
 
 
 def evaluate(env, agent, num_episodes: int = 10) -> dict:
@@ -221,10 +199,11 @@ def train(config: dict, experiment_name: str,
             next_state, reward, terminated, truncated, info = env.step(action)
             next_action_mask = env.get_action_mask() if hasattr(env, "get_action_mask") else None
 
-            # Store transition
+            # Store transition. done = terminated (không gồm truncated): hết max_steps chỉ là
+            # cắt thời gian, vẫn bootstrap từ next_state. Train generalist: experiments/train_generalist.py
             agent.store_transition(
                 state, action, reward, next_state,
-                terminated or truncated,
+                terminated,
                 next_action_mask=next_action_mask,
             )
 
@@ -369,7 +348,4 @@ if __name__ == '__main__':
 
 
 # Example usage:
-# Single-pool:
-#   python train.py --config configs/dqn_default.yaml --experiment-name dqn_stable_price
-# Multi-pool:
 #   python train.py --config configs/multi_pool_stable.yaml --experiment-name mp_stable

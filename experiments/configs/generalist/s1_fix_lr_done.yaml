@@ -1,0 +1,11 @@
+# Bước 1 — chỉ sửa 2 lỗi train, mọi thứ khác giữ y như v41.
+# So sánh với best_mixed_v41.pth (cùng eval config này) để biết riêng 2 lỗi ảnh hưởng bao nhiêu.
+extends: v41.yaml
+version: s1_fix_lr_done
+
+agent:
+  lr_schedule: constant       # trước: step → LR về ~0 sau ~400k grad step
+
+training:
+  bootstrap_on_truncation: true   # lưu done = terminated (env không bao giờ terminate),
+                                  # hết 672 step chỉ là cắt thời gian, không phải "hết tương lai"

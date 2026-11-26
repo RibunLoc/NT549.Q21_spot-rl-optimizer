@@ -61,26 +61,25 @@ python data/scripts/preprocess.py \
 ## 3. Test Gym environment (5 phút)
 
 ```bash
-# Test với random policy
+# Test multi-pool env với random policy
 python -c "
 import sys
 sys.path.append('.')
-from envs.spot_env import SpotInstanceEnv
+from envs.spot_orchestrator_env import SpotOrchestratorEnv
 
-env = SpotInstanceEnv(
-    data_path='data/processed/price_features_stable.pkl',
-    max_steps=100
+env = SpotOrchestratorEnv(
+    data_path='data/processed/multipool_stable.csv',
+    max_steps=100,
 )
 
 obs, info = env.reset()
-print('Initial state:', obs)
-print('Initial info:', info)
+print('State dim:', obs.shape)
 
 for i in range(10):
+    mask = env.get_action_mask()
     action = env.action_space.sample()
     obs, reward, terminated, truncated, info = env.step(action)
     print(f'Step {i}: action={action}, reward={reward:.2f}, cost={info.get(\"cost\", 0):.2f}')
-
     if terminated or truncated:
         break
 
@@ -88,42 +87,28 @@ print('Test passed!')
 "
 ```
 
-## 4. Train DQN agent (1-2 giờ)
+## 4. Train DQN agent
+
+Training thực tế chạy trên notebook (Kaggle / RunPod) — xem `notebooks/kaggle_train.ipynb`
+hoặc `notebooks/runpod_train.ipynb`. Để train nhanh local qua CLI:
 
 ```bash
-# Training với config mặc định
 python experiments/train.py \
-    --config experiments/configs/dqn_default.yaml \
-    --experiment-name dqn_first_run
-
-# Monitor training (mở terminal khác)
-tensorboard --logdir results/dqn_first_run/
-# Mở browser: http://localhost:6006
+    --config experiments/configs/multi_pool_stable.yaml \
+    --experiment-name mp_stable
 ```
 
-**Lưu ý:** Training 5000 episodes có thể mất 1-2 giờ. Để test nhanh, sửa `num_episodes: 100` trong config.
-
-## 5. Evaluate agent (5 phút)
+## 5. Evaluate agent + so sánh baselines (10 phút)
 
 ```bash
-python experiments/evaluate.py \
-    --model results/models/dqn_first_run_best.pth \
-    --config experiments/configs/stable_price.yaml \
-    --episodes 100 \
-    --seeds 5 \
-    --output-dir results
-```
+# Đánh giá DQN + 6 baseline trên 4 scenario
+python experiments/evaluate_kaggle.py \
+    --model results/kaggle/best_eval.pth \
+    --episodes 30 \
+    --output-dir results/kaggle/eval
 
-## 6. Compare với baselines (10 phút)
-
-```bash
-python experiments/compare_baselines.py \
-    --dqn-model results/models/dqn_first_run_best.pth \
-    --scenarios stable,volatile,spike \
-    --episodes 50 \
-    --output-dir results
-
-python experiments/generate_report.py --results-dir results
+# Sinh report Markdown
+python experiments/generate_report.py --results-dir results/kaggle/eval
 ```
 
 ---
@@ -140,7 +125,7 @@ aws configure
 
 ### Lỗi: CUDA out of memory
 
-Sửa trong `experiments/configs/dqn_default.yaml`:
+Sửa trong `experiments/configs/multi_pool_stable.yaml`:
 ```yaml
 agent:
   batch_size: 32  # Giảm từ 64

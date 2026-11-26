@@ -384,3 +384,77 @@ class DuelingQNetwork(nn.Module):
         q_values = value + (advantages - advantages.mean(dim=1, keepdim=True))
 
         return q_values
+
+
+class PoolwiseDuelingQNetwork(nn.Module):
+    """
+    Dueling Q-network với advantage riêng cho từng cặp (op, pool). Dùng với obs_version=2.
+
+    Khác FactoredDuelingQNetwork (Q = V + A_op + A_pool): ở đó mọi op dùng CHUNG một thứ hạng
+    pool, nên pool "tốt nhất để PROVISION" cũng là pool bị chọn đầu tiên để RELEASE/CONVERT.
+    Ở đây mỗi pool đi qua một encoder dùng chung trọng số (input = feature của pool + ngữ cảnh
+    toàn cục), rồi ra n_ops advantage cho chính pool đó → A[op, pool] có tương tác đầy đủ.
+
+    State layout (obs v2): [global (n_global) | pool_0 (pool_feat_dim) | ... | pool_{P-1}]
+    với pool theo đúng thứ tự action index (pool_idx = type_idx * N_AZS + az_idx).
+
+    Output: flat [batch, n_ops * n_pools + 1], index = op * n_pools + pool_idx, HOLD ở cuối.
+    """
+
+    def __init__(
+        self,
+        state_dim: int,
+        n_global: int,
+        n_pools: int = 15,
+        pool_feat_dim: int = 13,
+        n_ops: int = 8,
+        hidden_dim: int = 256,
+    ):
+        super().__init__()
+        expected = n_global + n_pools * pool_feat_dim
+        if state_dim != expected:
+            raise ValueError(
+                f"PoolwiseDuelingQNetwork cần state_dim={expected} "
+                f"(n_global={n_global} + {n_pools}×{pool_feat_dim}), nhận {state_dim}. "
+                f"Kiểm tra sim.obs_version=2 trong config."
+            )
+        self.state_dim = state_dim
+        self.n_global = n_global
+        self.n_pools = n_pools
+        self.pool_feat_dim = pool_feat_dim
+        self.n_ops = n_ops
+        self.n_actions = n_ops * n_pools + 1
+        h = hidden_dim
+        hp = hidden_dim // 2
+
+        self.global_enc = nn.Sequential(
+            nn.Linear(n_global, h), nn.ReLU(),
+            nn.Linear(h, h), nn.ReLU(),
+        )
+        self.pool_enc = nn.Sequential(
+            nn.Linear(pool_feat_dim + h, hp), nn.ReLU(),
+            nn.Linear(hp, hp), nn.ReLU(),
+        )
+        self.pool_adv = nn.Linear(hp, n_ops)
+        # Ngữ cảnh = global + trung bình embedding các pool
+        self.value_head = nn.Sequential(nn.Linear(h + hp, hp), nn.ReLU(), nn.Linear(hp, 1))
+        self.hold_adv = nn.Sequential(nn.Linear(h + hp, hp), nn.ReLU(), nn.Linear(hp, 1))
+
+    def forward(self, state: torch.Tensor) -> torch.Tensor:
+        batch = state.shape[0]
+        g_in = state[:, :self.n_global]
+        p_in = state[:, self.n_global:].reshape(batch, self.n_pools, self.pool_feat_dim)
+
+        hg = self.global_enc(g_in)                                        # [B, h]
+        hg_rep = hg.unsqueeze(1).expand(batch, self.n_pools, hg.shape[1])  # [B, P, h]
+        hp = self.pool_enc(torch.cat([p_in, hg_rep], dim=2))              # [B, P, hp]
+
+        ctx = torch.cat([hg, hp.mean(dim=1)], dim=1)                      # [B, h + hp]
+        v = self.value_head(ctx)                                          # [B, 1]
+
+        a_pool = self.pool_adv(hp).transpose(1, 2)                        # [B, n_ops, P]
+        a_pool = a_pool.reshape(batch, self.n_ops * self.n_pools)         # index = op*P + pool
+        a_hold = self.hold_adv(ctx)                                       # [B, 1]
+
+        adv = torch.cat([a_pool, a_hold], dim=1)                          # [B, n_actions]
+        return v + adv - adv.mean(dim=1, keepdim=True)

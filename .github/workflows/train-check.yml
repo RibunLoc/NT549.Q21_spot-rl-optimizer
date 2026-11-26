@@ -1,0 +1,106 @@
+# Theo dõi lần train trên Kaggle do train-submit.yml gửi đi.
+# Mỗi lần chạy chỉ mất ~1 phút: hỏi trạng thái rồi thoát, không ngồi chờ.
+#
+#   RUNNING / QUEUED → báo "đang train", thoát bình thường
+#   ERROR / CANCEL   → báo lỗi (workflow đỏ → GitHub gửi mail)
+#   COMPLETE         → liệt kê run MLflow có tag gate_status=pending
+#                      (bước EVAL GATE sẽ gắn vào đây sau)
+#
+# Không dùng push / pull_request: không có lý do gì để chạy theo commit.
+name: train-check
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # mỗi giờ (giờ UTC). Chỉ chạy trên default branch.
+  workflow_dispatch:
+
+concurrency:
+  group: kaggle-check
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+  KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+  MLFLOW_TRACKING_URI: https://mlflow.holoc.id.vn
+  MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+  MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+  MLFLOW_EXPERIMENT: spot-rl-generalist
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      state: ${{ steps.status.outputs.state }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Kaggle CLI
+        run: pip install kaggle
+
+      - name: Kaggle kernel status
+        id: status
+        run: |
+          s=$(kaggle kernels status "${KAGGLE_USERNAME}/spot-rl-train" 2>&1 || true)
+          echo "Kernel status: $s"
+          case "$s" in
+            *RUNNING*|*QUEUED*)     state=running ;;
+            *COMPLETE*)             state=complete ;;
+            *ERROR*|*CANCEL*)       state=failed ;;
+            *)                      state=unknown ;;
+          esac
+          echo "state=$state" >> "$GITHUB_OUTPUT"
+          echo "### Kaggle: \`$state\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report failure
+        if: steps.status.outputs.state == 'failed'
+        run: |
+          echo "::error::Kaggle train lỗi hoặc bị cancel. Xem log: https://www.kaggle.com/code/${KAGGLE_USERNAME}/spot-rl-train"
+          echo "Lỗi này sẽ báo lại mỗi giờ tới khi submit lần train mới."
+          exit 1
+
+  pending-runs:
+    needs: check
+    if: needs.check.outputs.state == 'complete'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install MLflow client
+        run: pip install mlflow-skinny
+
+      - name: Find runs waiting for eval
+        shell: python
+        run: |
+          import os
+          from mlflow.tracking import MlflowClient
+
+          c = MlflowClient()
+          exp = c.get_experiment_by_name(os.environ["MLFLOW_EXPERIMENT"])
+          if exp is None:
+              raise SystemExit(f"Không thấy experiment {os.environ['MLFLOW_EXPERIMENT']}")
+
+          runs = c.search_runs(
+              [exp.experiment_id],
+              filter_string="tags.gate_status = 'pending' and attributes.status = 'FINISHED'",
+              order_by=["attributes.start_time DESC"],
+          )
+
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              if not runs:
+                  f.write("Không có run nào chờ eval.\n")
+              for r in runs:
+                  line = f"- run `{r.info.run_id}` · commit `{r.data.tags.get('git_sha', '?')}`"
+                  print(line)
+                  f.write(line + "\n")
+
+          # TODO (bước EVAL GATE): gọi workflow eval cho từng run ở đây,
+          # eval xong đổi tag gate_status thành passed/failed để không bị xử lý lại.

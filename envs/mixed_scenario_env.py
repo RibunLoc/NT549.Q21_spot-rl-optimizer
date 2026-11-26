@@ -33,6 +33,7 @@ class MixedScenarioEnv(gym.Env):
         workload_config: Dict[str, Any] = None,
         reward_config: Dict[str, Any] = None,
         seed: Optional[int] = None,
+        sim_config: Dict[str, Any] = None,
     ):
         super().__init__()
         assert len(scenario_paths) >= 1, "Need at least one scenario"
@@ -51,6 +52,7 @@ class MixedScenarioEnv(gym.Env):
                 workload_config=workload_config,
                 reward_config=reward_config,
                 seed=sub_seed,
+                sim_config=sim_config,
             )
 
         # Sampling weights

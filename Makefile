@@ -76,26 +76,15 @@ data: data-synthetic data-workload data-preprocess
 # --- Training ---
 train:
 	python experiments/train.py \
-		--config experiments/configs/dqn_default.yaml \
-		--experiment-name dqn_default
-
-train-quick:
-	python experiments/train.py \
-		--config experiments/configs/dqn_quick_test.yaml \
-		--experiment-name quick_test
+		--config experiments/configs/multi_pool_stable.yaml \
+		--experiment-name mp_stable
 
 # --- Evaluation ---
 evaluate:
-	python experiments/evaluate.py \
-		--config experiments/configs/stable_price.yaml \
-		--model results/models/dqn_default_best.pth \
-		--episodes 50
-
-compare-baselines:
-	python experiments/compare_baselines.py \
-		--scenarios stable,volatile,spike \
-		--dqn-model results/models/dqn_default_best.pth \
-		--episodes 50
+	python experiments/evaluate_kaggle.py \
+		--model results/kaggle/best_eval.pth \
+		--episodes 30 \
+		--output-dir results/kaggle/eval
 
 # --- Serving ---
 serve:

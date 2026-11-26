@@ -1,0 +1,15 @@
+# Bước 4 — state có block feature cho từng pool (đúng thứ tự action) + head op×pool.
+# obs v2 (254 dims) bỏ progress / budget_spent_ratio / avg_wait cộng dồn.
+# LƯU Ý: model từ bước này KHÔNG chạy được với controller Go hiện tại (controller build state
+# 92 dims). Cần sửa internal/state/collector.go theo envs/spot_orchestrator_env.py
+# (_get_observation + _pool_block_features) trước khi deploy.
+extends: s3_interrupt_realistic.yaml
+version: s4_pool_obs
+
+env:
+  sim:
+    obs_version: 2
+
+agent:
+  network_type: poolwise
+  hidden_dim: 256

@@ -1,0 +1,12 @@
+# Bước 3 — interrupt sát thực tế, tính theo từng instance.
+# Data cũ: est_interruption_prob ~0.11 mỗi step 15 phút mỗi pool (≈ mất 1 instance / 2 giờ / pool).
+# AWS Spot Advisor ghi tần suất theo THÁNG (<5%, 5–10%, ... >20%).
+# 0.0035 lần/instance/ngày ≈ 10%/tháng. est_interruption_prob vẫn là tín hiệu rủi ro tương đối
+# (pool nào rủi ro hơn thì bị nhiều hơn), chỉ scale lại mức trung bình.
+extends: s1_fix_lr_done.yaml
+version: s3_interrupt_realistic
+
+env:
+  sim:
+    interrupt_model: per_instance
+    interrupt_rate_per_day: 0.0035

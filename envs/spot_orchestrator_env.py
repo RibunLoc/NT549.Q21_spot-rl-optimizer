@@ -10,6 +10,8 @@ Agent learns to choose: which operation, which instance type, which AZ
 to minimize cost while maintaining SLA for batch processing workloads.
 """
 
+import math
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -20,8 +22,11 @@ from dataclasses import dataclass, field
 from envs.instance_catalog import (
     INSTANCE_TYPES, AVAILABILITY_ZONES, N_TYPES, N_AZS,
     STATE_DIM, MAX_INSTANCES, MAX_PER_AZ, MAX_VCPU, MAX_JOBS, MAX_WAIT,
+    OBS_V1_DROP_FOR_V2, state_dim_for,
     get_od_price, get_max_od_price,
 )
+
+STEPS_PER_DAY = 96  # 1 step = 15 phút
 from envs.action_schema import (
     Operation, N_ACTIONS, N_POOLS, HOLD_ACTION, OPERATION_NAMES,
     decode_action, encode_action,
@@ -57,8 +62,31 @@ class SpotOrchestratorEnv(gym.Env):
         reward_config: Dict[str, Any] = None,
         seed: Optional[int] = None,
         render_mode: str = None,
+        sim_config: Dict[str, Any] = None,
     ):
+        """
+        sim_config (mọi key đều tùy chọn; mặc định = hành vi cũ ≤v42):
+          obs_version:            1 (92 dims, cũ) | 2 (bỏ feature theo episode + block từng pool)
+          interrupt_model:        "pool" (cũ: mỗi pool mỗi step mất tối đa 1 instance, giết 1 job)
+                                  | "per_instance" (mỗi spot instance bị interrupt độc lập,
+                                    giết mọi job đang chạy trên instance đó)
+          interrupt_rate_per_day: per_instance: số lần interrupt kỳ vọng / instance / ngày (trung
+                                  bình trên data). est_interruption_prob trong data chỉ dùng làm
+                                  chỉ số rủi ro tương đối. 0.0035/ngày ≈ 10%/tháng (Spot Advisor).
+          cost_step_hours:        hệ số nhân giá $/giờ cho mỗi step. 1.0 = cũ (tính nguyên giá
+                                  1 giờ cho step 15 phút → $ gấp 4 lần thật); 0.25 = đúng.
+        """
         super().__init__()
+
+        sc = sim_config or {}
+        self.obs_version = int(sc.get('obs_version', 1))
+        if self.obs_version not in (1, 2):
+            raise ValueError(f"obs_version must be 1 or 2, got {self.obs_version}")
+        self.interrupt_model = sc.get('interrupt_model', 'pool')
+        if self.interrupt_model not in ('pool', 'per_instance'):
+            raise ValueError(f"interrupt_model must be 'pool' or 'per_instance', got {self.interrupt_model}")
+        self.interrupt_rate_per_day = sc.get('interrupt_rate_per_day', 0.0035)
+        self.cost_step_hours = float(sc.get('cost_step_hours', 1.0))
 
         self.max_steps = max_steps
         self.sla_threshold = sla_threshold
@@ -93,19 +121,42 @@ class SpotOrchestratorEnv(gym.Env):
             seed=seed,
         )
 
+        # Per-instance interrupt: p_step = raw_prob × scale, scale chọn sao cho trung bình
+        # trên data = interrupt_rate_per_day / STEPS_PER_DAY.
+        if 'est_interruption_prob' in self.price_data.columns:
+            mean_raw = float(self.price_data['est_interruption_prob'].clip(0.01, 0.5).mean())
+        else:
+            mean_raw = 0.05
+        self._interrupt_scale = (
+            (float(self.interrupt_rate_per_day) / STEPS_PER_DAY) / max(mean_raw, 1e-6)
+        )
+
         # Workload generator
         # v14: defaults scaled for 15-min step (÷4 rate, ×4 duration vs hourly)
+        # Lưu ý: ≤v42 env KHÔNG truyền spike_* xuống generator → luôn dùng mặc định
+        # (0.02, 3.0) dù config ghi spike_multiplier=2.0. Default dưới đây giữ đúng hành vi đó.
+        # peak_multiplier được nhận nhưng WorkloadGenerator không dùng (xem _get_current_rate).
         wc = workload_config or {}
         self.workload_gen = WorkloadGenerator(
             base_arrival_rate=wc.get('base_arrival_rate', 1.25),   # 5/h → 1.25/15min
             peak_multiplier=wc.get('peak_multiplier', 3.0),
             avg_job_duration=wc.get('avg_job_duration', 12),        # 3h → 12 steps
+            weekend_factor=wc.get('weekend_factor', 0.6),
+            spike_probability=wc.get('spike_probability', 0.02),
+            spike_multiplier=wc.get('spike_multiplier', 3.0),
             seed=seed,
         )
 
         # Reward config — rescale xuống cùng magnitude với savings ($0.1-2/step)
         # để gradient không bị SLA penalty dominate.
         rc = reward_config or {}
+        # mode "shaped" = reward 11 thành phần cũ (≤v42).
+        # mode "simple" = -(cost + failed_job_cost × job_fail + action_cost × [action có hiệu lực]).
+        self.reward_mode = rc.get('mode', 'shaped')
+        if self.reward_mode not in ('shaped', 'simple'):
+            raise ValueError(f"reward.mode must be 'shaped' or 'simple', got {self.reward_mode}")
+        self.failed_job_cost = float(rc.get('failed_job_cost', 0.5))
+        self.action_cost = float(rc.get('action_cost', 0.005))
         # v35: tăng sla_penalty 2.0→3.5 để counter slow policy degradation (SLA drift ~0.88)
         # v34 dùng 2.0 quá nhẹ: agent học tiết kiệm cost > duy trì SLA qua 5000 ep
         self.sla_penalty_coeff = rc.get('sla_penalty', 3.5)
@@ -147,7 +198,7 @@ class SpotOrchestratorEnv(gym.Env):
 
         # Spaces
         self.observation_space = spaces.Box(
-            low=0.0, high=1.0, shape=(STATE_DIM,), dtype=np.float32
+            low=0.0, high=1.0, shape=(state_dim_for(self.obs_version),), dtype=np.float32
         )
         self.action_space = spaces.Discrete(N_ACTIONS)
 
@@ -188,6 +239,7 @@ class SpotOrchestratorEnv(gym.Env):
         self.step_rebalance = 0            # REBALANCE_SPOT count
         self.step_interruptions = 0
         self.step_wasted_action = False
+        self.step_effective_action = False  # action ≠ HOLD và có hiệu lực (cho action_cost)
         self.step_migrate_to_spot = False   # for migrate-back bonus
         self.step_provision_spot_success = 0  # v26: đếm PROVISION_SPOT thành công
 
@@ -442,6 +494,8 @@ class SpotOrchestratorEnv(gym.Env):
         elif op == Operation.HOLD:
             pass  # no-op
 
+        self.step_effective_action = (op != Operation.HOLD and not self.step_wasted_action)
+
         # Set per-pool cooldown after any effective (non-wasted, non-HOLD) action.
         # v14-fix: KHÔNG cooldown cho RELEASE — agent cần shrink nhanh khi over-provision.
         is_release = op in (Operation.RELEASE_SPOT, Operation.RELEASE_ONDEMAND)
@@ -457,7 +511,51 @@ class SpotOrchestratorEnv(gym.Env):
         # 1. Step all market simulators
         market_results = self.market_sim.step()
 
-        # 2. Handle interruptions per pool
+        # 2. Handle interruptions
+        if self.interrupt_model == 'per_instance':
+            self._apply_per_instance_interruptions(market_results)
+        else:
+            self._apply_pool_interruptions(market_results)
+
+        self._simulate_jobs_and_cost()
+
+    def _apply_per_instance_interruptions(self, market_results):
+        """Mỗi spot instance bị interrupt độc lập với p = raw_prob × scale.
+
+        Instance bị thu hồi mang theo các job đang chạy trên nó (ước lượng = số job của
+        pool chia đều cho số instance của pool, tối đa = vCPU của instance).
+        """
+        for (t_idx, az_idx), (price, interr_prob, _) in market_results.items():
+            pool = self.pools[(t_idx, az_idx)]
+            if pool.spot_count <= 0:
+                continue
+            p = min(max(interr_prob * self._interrupt_scale, 0.0), 0.5)
+            n_int = int(self.np_random.binomial(pool.spot_count, p))
+            if n_int == 0:
+                continue
+
+            key = (t_idx, az_idx)
+            n_inst_before = pool.spot_count + pool.ondemand_count
+            job_idx = [i for i, j in enumerate(self.running_jobs_list) if j.pool == key]
+            per_inst = min(
+                math.ceil(len(job_idx) / max(n_inst_before, 1)),
+                INSTANCE_TYPES[t_idx].vcpus,
+            )
+            n_kill = min(len(job_idx), n_int * per_inst)
+            if n_kill > 0:
+                kill = set(job_idx[:n_kill])
+                self.running_jobs_list = [
+                    j for i, j in enumerate(self.running_jobs_list) if i not in kill
+                ]
+                self.pool_running_jobs[key] = max(0, self.pool_running_jobs[key] - n_kill)
+                self.failed_jobs += n_kill
+                self.step_failed_jobs += n_kill
+
+            pool.spot_count -= n_int
+            self.step_interruptions += n_int
+
+    def _apply_pool_interruptions(self, market_results):
+        """Hành vi cũ (≤v42): mỗi pool mỗi step mất tối đa 1 instance, giết 1 job."""
         for (t_idx, az_idx), (price, interr_prob, interrupted) in market_results.items():
             pool = self.pools[(t_idx, az_idx)]
             if interrupted and pool.spot_count > 0:
@@ -476,6 +574,8 @@ class SpotOrchestratorEnv(gym.Env):
                     self.failed_jobs += 1
                     self.step_failed_jobs += 1
 
+    def _simulate_jobs_and_cost(self):
+        """Phần còn lại của 1 timestep: job mới, tick job, schedule, SLA, cost."""
         # 3. Generate new jobs
         new_jobs = self.workload_gen.step()
         self.pending_jobs = len(self.workload_gen.pending_jobs)
@@ -583,6 +683,8 @@ class SpotOrchestratorEnv(gym.Env):
             od_price = INSTANCE_TYPES[t_idx].ondemand_price
             self.step_cost += pool.spot_count * spot_price
             self.step_cost += pool.ondemand_count * od_price
+        # Giá là $/giờ; cost_step_hours=0.25 cho step 15 phút (1.0 = hành vi cũ)
+        self.step_cost *= self.cost_step_hours
         self.total_cost += self.step_cost
 
         # 10. Migrate-back tracking
@@ -627,10 +729,19 @@ class SpotOrchestratorEnv(gym.Env):
         # v25-fix: max(0,...) thay vì max(1,...) — khi không có job thì baseline=0,
         # tránh agent thấy savings giả khi provision lúc idle.
         required_instances = max(0, required_vcpu / 2.0)
-        baseline_od_cost = required_instances * avg_od
+        baseline_od_cost = required_instances * avg_od * self.cost_step_hours
 
         # Accumulate for state feature [33] budget_spent_ratio
         self.cumulative_baseline_od_cost += baseline_od_cost
+
+        if self.reward_mode == 'simple':
+            # Train đúng thứ được đo: chi phí thật + giá của mỗi job fail + phí nhỏ cho
+            # mỗi lần đổi fleet (launch/drain mất vài phút trên AWS thật).
+            return float(-(
+                self.step_cost
+                + self.failed_job_cost * self.step_failed_jobs
+                + self.action_cost * float(self.step_effective_action)
+            ))
 
         # savings > 0 khi step_cost thấp hơn "cost nếu chạy đủ OD cho workload"
         # savings < 0 khi over-provision (fleet quá lớn → step_cost > baseline)
@@ -926,7 +1037,9 @@ class SpotOrchestratorEnv(gym.Env):
 
         # Cost rate (current step cost normalized)
         max_cost_rate = sum(t.ondemand_price for t in INSTANCE_TYPES) * MAX_PER_AZ
-        features.append(np.clip(self.step_cost / max(max_cost_rate, 1e-6), 0, 1.0))  # [31]
+        # Dùng cost theo giờ để feature không đổi scale khi cost_step_hours ≠ 1
+        hourly_cost = self.step_cost / max(self.cost_step_hours, 1e-9)
+        features.append(np.clip(hourly_cost / max(max_cost_rate, 1e-6), 0, 1.0))  # [31]
 
         # SLA health (rolling 10-step window)
         if self.sla_window:
@@ -1033,8 +1146,39 @@ class SpotOrchestratorEnv(gym.Env):
             for az in range(N_AZS):
                 features.append(np.clip(self.pool_ram_util.get((t, az), 0.0), 0.0, 1.0))
 
+        if self.obs_version == 2:
+            drop = set(OBS_V1_DROP_FOR_V2)
+            global_feats = [v for i, v in enumerate(features[:62]) if i not in drop]
+            features = global_feats + self._pool_block_features()
+
         obs = np.array(features, dtype=np.float32)
         return np.clip(obs, 0.0, 1.0)
+
+    def _pool_block_features(self) -> List[float]:
+        """Obs v2: 15 pool × OBS_V2_POOL_FEATS, theo đúng thứ tự action (type_idx * N_AZS + az_idx)."""
+        max_od = self.max_od_price
+        max_vcpus = max(t.vcpus for t in INSTANCE_TYPES)
+        cd = max(self.cooldown_steps, 1)
+        out: List[float] = []
+        for t in range(N_TYPES):
+            itype = INSTANCE_TYPES[t]
+            for az in range(N_AZS):
+                pool = self.pools[(t, az)]
+                price = self.market_sim.get_pool_price(t, az)
+                out.extend([
+                    float(np.clip(price / itype.ondemand_price, 0.0, 2.0) / 2.0),
+                    float(np.clip(self.market_sim.get_pool_interrupt_prob(t, az), 0.0, 1.0)),
+                    float(np.clip(self.market_sim.get_pool_sps_score(t, az), 0.0, 1.0)),
+                    float(np.clip(self.market_sim.get_pool_price_cv(t, az) / 0.5, 0.0, 1.0)),
+                    min(pool.spot_count / MAX_PER_AZ, 1.0),
+                    min(pool.ondemand_count / MAX_PER_AZ, 1.0),
+                    min(self.pool_cooldown[(t, az)] / cd, 1.0),
+                    float(np.clip(self.pool_cpu_util.get((t, az), 0.0), 0.0, 1.0)),
+                    itype.vcpus / max_vcpus,
+                    itype.ondemand_price / max_od,
+                ])
+                out.extend([1.0 if a == az else 0.0 for a in range(N_AZS)])
+        return out
 
     # ──────────────────────────────────────────────
     #  Helpers
@@ -1101,8 +1245,24 @@ class SpotOrchestratorEnv(gym.Env):
             "failed_jobs": self.failed_jobs,
             "sla_compliance": self._calculate_sla(),
             "spot_launch_failed": self.step_spot_launch_failed,
+            "step_interruptions": self.step_interruptions,
             "type_distribution": type_dist,
             "az_distribution": az_dist,
+            # Per-pool view (thứ tự = pool_idx trong action) cho baseline heuristic
+            "pools": [
+                {
+                    "type_idx": t,
+                    "az_idx": az,
+                    "vcpus": INSTANCE_TYPES[t].vcpus,
+                    "spot": self.pools[(t, az)].spot_count,
+                    "od": self.pools[(t, az)].ondemand_count,
+                    "price": self.market_sim.get_pool_price(t, az),
+                    "od_price": INSTANCE_TYPES[t].ondemand_price,
+                    "sps": self.market_sim.get_pool_sps_score(t, az),
+                    "risk": self.market_sim.get_pool_interrupt_prob(t, az),
+                }
+                for t in range(N_TYPES) for az in range(N_AZS)
+            ],
         }
 
     def get_action_mask(self) -> np.ndarray:

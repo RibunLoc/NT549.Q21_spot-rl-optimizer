@@ -1,0 +1,15 @@
+# Bước 5 — reward chỉ còn đúng thứ được đo:
+#   r = -(cost_$ + failed_job_cost × số job fail + action_cost × [có đổi fleet])
+# cost tính đúng đơn vị (giá $/giờ × 0.25 giờ mỗi step), nên $ trong báo cáo là $ thật.
+# failed_job_cost là núm chỉnh đánh đổi cost–SLA: chạy vài giá trị (vd 0.2 / 0.5 / 1 / 2)
+# rồi vẽ đường cost–SLA, chọn điểm đạt SLA ≥ 95% với cost thấp nhất.
+extends: s4_pool_obs.yaml
+version: s5_simple_reward
+
+env:
+  reward:
+    mode: simple
+    failed_job_cost: 0.5      # $ cho mỗi job fail
+    action_cost: 0.005        # $ ~ 3 phút billing của 1 instance nhỏ khi launch/drain
+  sim:
+    cost_step_hours: 0.25

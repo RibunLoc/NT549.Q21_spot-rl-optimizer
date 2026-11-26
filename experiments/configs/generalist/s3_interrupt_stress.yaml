@@ -1,0 +1,10 @@
+# Bước 3 (kịch bản stress) — vẫn per-instance nhưng mỗi instance trung bình bị thu hồi
+# 1 lần/ngày. Khắc nghiệt hơn thực tế nhiều, dùng để xem agent có biết phòng thủ khi spot
+# thật sự bất ổn (vd. đợt thiếu capacity) hay không. Không dùng để báo cáo % tiết kiệm.
+extends: s1_fix_lr_done.yaml
+version: s3_interrupt_stress
+
+env:
+  sim:
+    interrupt_model: per_instance
+    interrupt_rate_per_day: 1.0

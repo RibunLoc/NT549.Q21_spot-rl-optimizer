@@ -10,6 +10,8 @@ Implements Double DQN + Dueling Network + Prioritized Experience Replay:
   → học nhanh hơn từ những tình huống khó (spike, interrupt, overprov)
 """
 
+import math
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,7 +19,7 @@ import numpy as np
 from typing import Optional, Tuple
 from collections import deque
 
-from agents.networks import DuelingQNetwork, FactoredDuelingQNetwork
+from agents.networks import DuelingQNetwork, FactoredDuelingQNetwork, PoolwiseDuelingQNetwork
 from agents.replay_buffer import ReplayBuffer, PrioritizedReplayBuffer
 
 
@@ -26,8 +28,16 @@ def _build_qnet(network_type: str, state_dim: int, action_dim: int, hidden_dim: 
 
     network_type:
       - "dueling":  flat DuelingQNetwork [state → action_dim]
-      - "factored": FactoredDuelingQNetwork [state → (op + pool + hold) → action_dim]
+      - "factored": FactoredDuelingQNetwork, Q = V + A_op + A_pool (mọi op chung 1 thứ hạng pool)
+      - "poolwise": PoolwiseDuelingQNetwork, A[op, pool] riêng cho từng cặp; cần obs_version=2
     """
+    if network_type == "poolwise":
+        from envs.action_schema import N_POOL_OPS, N_POOLS
+        from envs.instance_catalog import OBS_V2_GLOBAL_DIM, OBS_V2_POOL_FEATS
+        return PoolwiseDuelingQNetwork(
+            state_dim=state_dim, n_global=OBS_V2_GLOBAL_DIM, n_pools=N_POOLS,
+            pool_feat_dim=OBS_V2_POOL_FEATS, n_ops=N_POOL_OPS, hidden_dim=hidden_dim,
+        )
     if network_type == "factored":
         from envs.action_schema import N_POOL_OPS, N_POOLS
         expected = N_POOL_OPS * N_POOLS + 1
@@ -39,7 +49,7 @@ def _build_qnet(network_type: str, state_dim: int, action_dim: int, hidden_dim: 
     elif network_type == "dueling":
         return DuelingQNetwork(state_dim, action_dim, hidden_dim=hidden_dim)
     else:
-        raise ValueError(f"Unknown network_type={network_type!r} (use 'dueling' or 'factored')")
+        raise ValueError(f"Unknown network_type={network_type!r} (use dueling|factored|poolwise)")
 
 
 class DQNAgent:
@@ -68,11 +78,16 @@ class DQNAgent:
         use_per: bool = True,
         per_alpha: float = 0.6,
         per_beta_start: float = 0.4,
-        network_type: str = "dueling",   # "dueling" (flat) | "factored" (op × pool)
+        network_type: str = "dueling",   # "dueling" | "factored" | "poolwise"
+        lr_schedule: str = "constant",   # "constant" | "cosine" | "step" (legacy ≤v42)
+        lr_min: float = 1e-6,            # cosine: LR sàn
+        lr_total_steps: int = 2_000_000, # cosine: số grad step để giảm từ lr → lr_min
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         self.state_dim = state_dim
         self.action_dim = action_dim
+        self.learning_rate = learning_rate
+        self.lr_schedule = lr_schedule
         self.gamma = gamma
         self.batch_size = batch_size
         self.target_update_freq = target_update_freq
@@ -97,8 +112,24 @@ class DQNAgent:
         # Optimizer — AdamW tốt hơn Adam về generalization (weight decay nhỏ)
         self.optimizer = optim.AdamW(self.q_network.parameters(), lr=learning_rate, weight_decay=1e-5)
 
-        # LR scheduler — giảm LR khi training ổn định
-        self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=50000, gamma=0.5)
+        # LR scheduler (gọi mỗi grad step).
+        # "step" là hành vi cũ (≤v42): StepLR(50k, 0.5) chia đôi LR mỗi 50k grad step,
+        # nên sau ~400k step LR < 1e-7 và model gần như ngừng học. Chỉ giữ để tái hiện v41.
+        if lr_schedule == "step":
+            self.scheduler = optim.lr_scheduler.StepLR(self.optimizer, step_size=50000, gamma=0.5)
+        elif lr_schedule == "cosine":
+            floor = lr_min / learning_rate
+            total = max(1, int(lr_total_steps))
+
+            def _cosine(step: int) -> float:
+                t = min(step, total) / total
+                return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * t))
+
+            self.scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=_cosine)
+        elif lr_schedule == "constant":
+            self.scheduler = None
+        else:
+            raise ValueError(f"Unknown lr_schedule={lr_schedule!r} (use constant|cosine|step)")
 
         # Replay buffer — PER mặc định
         if use_per:
@@ -257,7 +288,8 @@ class DQNAgent:
         loss.backward()
         torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), max_norm=1.0)
         self.optimizer.step()
-        self.scheduler.step()
+        if self.scheduler is not None:
+            self.scheduler.step()
 
         # Update PER priorities
         if self.use_per:
@@ -287,7 +319,9 @@ class DQNAgent:
             'q_network_state_dict': self.q_network.state_dict(),
             'target_network_state_dict': self.target_network.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict() if self.scheduler is not None else None,
+            'lr_schedule': self.lr_schedule,
+            'learning_rate': self.learning_rate,
             'epsilon': self.epsilon,
             'steps_done': self.steps_done,
             'use_per': self.use_per,
@@ -298,20 +332,35 @@ class DQNAgent:
         }, path)
 
     def load(self, path: str):
-        """Load model checkpoint."""
+        """Load model checkpoint.
+
+        Checkpoint cũ (≤v42) không có 'lr_schedule' → coi là "step". Nếu agent hiện tại
+        dùng schedule khác, KHÔNG nạp scheduler cũ và đặt lại LR (optimizer state cũ
+        mang LR đã bị StepLR kéo về ~1e-11).
+        """
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.q_network.load_state_dict(checkpoint['q_network_state_dict'])
         self.target_network.load_state_dict(checkpoint['target_network_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        ckpt_schedule = checkpoint.get('lr_schedule', 'step')
+        sched_state = checkpoint.get('scheduler_state_dict')
+        if self.scheduler is not None and ckpt_schedule == self.lr_schedule and sched_state:
+            self.scheduler.load_state_dict(sched_state)
+        else:
+            for group in self.optimizer.param_groups:
+                group['lr'] = self.learning_rate
+                group['initial_lr'] = self.learning_rate
         self.epsilon = checkpoint['epsilon']
         self.steps_done = checkpoint['steps_done']
+
+    def current_lr(self) -> float:
+        return float(self.optimizer.param_groups[0]['lr'])
 
     def get_metrics(self) -> dict:
         """Return training metrics."""
         return {
             'epsilon': self.epsilon,
+            'lr': self.current_lr(),
             'steps_done': self.steps_done,
             'avg_loss': np.mean(self.loss_history) if self.loss_history else 0.0,
             'buffer_size': len(self.replay_buffer),

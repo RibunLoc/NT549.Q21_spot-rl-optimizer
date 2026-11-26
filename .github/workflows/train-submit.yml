@@ -1,0 +1,94 @@
+# Gửi một lần train lên Kaggle rồi kết thúc ngay (không ngồi chờ).
+# Kết quả do train-check.yml theo dõi.
+#
+# Chỉ chạy khi bấm tay: Actions → train-submit → Run workflow.
+# KHÔNG dùng push / pull_request / pull_request_target:
+#   - mỗi lần chạy tốn GPU Kaggle (~30 giờ/tuần)
+#   - workflow dùng secrets; PR từ fork không được chạm vào secrets
+#
+# Cách truyền tham số sang Kaggle: điền commit + config vào 2 placeholder
+# (__GIT_SHA__, __RUN_CONFIG__) trong bản copy của notebook rồi push.
+# Notebook tự `git fetch` đúng commit đó và `dvc pull` data từ S3,
+# nên không cần upload code/data lên Kaggle Dataset.
+name: train-submit
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Config train (đường dẫn trong repo)"
+        required: true
+        default: experiments/configs/generalist/s5_simple_reward.yaml
+
+# Không cho 2 lần submit chạy song song
+concurrency:
+  group: kaggle-train
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
+  KAGGLE_KEY: ${{ secrets.KAGGLE_KEY }}
+
+jobs:
+  submit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Kaggle CLI
+        run: pip install kaggle
+
+      - name: Validate config path
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          [[ "$CONFIG" =~ ^experiments/configs/[A-Za-z0-9_./-]+\.ya?ml$ ]] \
+            || { echo "::error::Đường dẫn config không hợp lệ: $CONFIG"; exit 1; }
+          test -f "$CONFIG" || { echo "::error::Không thấy config trong commit này: $CONFIG"; exit 1; }
+
+      - name: Refuse if a training run is still going
+        run: |
+          status=$(kaggle kernels status "${KAGGLE_USERNAME}/spot-rl-train" 2>&1 || true)
+          echo "Kernel status: $status"
+          case "$status" in
+            *RUNNING*|*QUEUED*)
+              echo "::error::Kaggle đang train dở. Đợi xong hoặc cancel trên Kaggle rồi submit lại."
+              exit 1 ;;
+          esac
+
+      - name: Prepare kernel (fill username + run params)
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          sed -i "s/KAGGLE_USER/${KAGGLE_USERNAME}/g" kaggle/kernel/kernel-metadata.json
+          cp notebooks/kaggle_train.ipynb kaggle/kernel/kaggle_train.ipynb
+          sed -i -e "s|__GIT_SHA__|${GITHUB_SHA}|" -e "s|__RUN_CONFIG__|${CONFIG}|" \
+            kaggle/kernel/kaggle_train.ipynb
+          # Chắc chắn đã điền được, tránh train nhầm commit/config mặc định
+          grep -q "GIT_SHA = '${GITHUB_SHA}'" kaggle/kernel/kaggle_train.ipynb \
+            || { echo "::error::Không điền được GIT_SHA vào notebook"; exit 1; }
+          grep -q "RUN_CONFIG = '${CONFIG}'" kaggle/kernel/kaggle_train.ipynb \
+            || { echo "::error::Không điền được RUN_CONFIG vào notebook"; exit 1; }
+
+      - name: Push kernel (start training)
+        run: kaggle kernels push -p kaggle/kernel
+
+      - name: Summary
+        env:
+          CONFIG: ${{ inputs.config }}
+        run: |
+          {
+            echo "### Đã gửi train lên Kaggle"
+            echo "- Commit: \`${GITHUB_SHA}\`"
+            echo "- Config: \`${CONFIG}\`"
+            echo "- Kernel: https://www.kaggle.com/code/${KAGGLE_USERNAME}/spot-rl-train"
+            echo "- Theo dõi: workflow **train-check**"
+          } >> "$GITHUB_STEP_SUMMARY"

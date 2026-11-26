@@ -10,6 +10,7 @@ from agents.baselines import (
     CheapestAZAgent,
     CheapestTypeAgent,
     RandomAgent,
+    AutoscalerAgent,
     BASELINES,
 )
 
@@ -21,5 +22,6 @@ __all__ = [
     "CheapestAZAgent",
     "CheapestTypeAgent",
     "RandomAgent",
+    "AutoscalerAgent",
     "BASELINES",
 ]

@@ -1,5 +1,5 @@
 """
-Export trained Factored Dueling DQN to ONNX for Go controller.
+Export trained DQN (factored hoặc poolwise) to ONNX for Go controller.
 
 Usage:
     python scripts/export_model.py --model results/kaggle/best_mixed_v23.pth \
@@ -14,15 +14,16 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agents.networks import FactoredDuelingQNetwork
+from agents.dqn_agent import _build_qnet
 from envs.instance_catalog import STATE_DIM
-from envs.action_schema import N_ACTIONS, N_POOL_OPS, N_POOLS
+from envs.action_schema import N_ACTIONS
 
 
-def load_network(checkpoint_path: str, device: str = "cpu") -> FactoredDuelingQNetwork:
+def load_network(checkpoint_path: str, device: str = "cpu") -> torch.nn.Module:
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     sd = ckpt.get("q_network_state_dict", ckpt)
 
+    network_type = ckpt.get("network_type", "factored")
     hidden_dim = ckpt.get("hidden_dim")
     if hidden_dim is None and "trunk.0.weight" in sd:
         hidden_dim = sd["trunk.0.weight"].shape[0]
@@ -30,21 +31,18 @@ def load_network(checkpoint_path: str, device: str = "cpu") -> FactoredDuelingQN
 
     state_dim = ckpt.get("state_dim", STATE_DIM)
 
-    net = FactoredDuelingQNetwork(
-        state_dim=state_dim,
-        n_ops=N_POOL_OPS,
-        n_pools=N_POOLS,
-        hidden_dim=hidden_dim,
-    )
+    # factored (obs v1, 92 dims) hoặc poolwise (obs v2, 254 dims — controller Go cần cập nhật)
+    net = _build_qnet(network_type, state_dim, ckpt.get("action_dim", N_ACTIONS), hidden_dim)
     net.load_state_dict(sd)
     net.eval()
-    print(f"  Network: FactoredDueling | state={state_dim} actions={net.n_actions} hidden={hidden_dim}")
+    net.state_dim = state_dim
+    print(f"  Network: {network_type} | state={state_dim} actions={net.n_actions} hidden={hidden_dim}")
     print(f"  Params: {sum(p.numel() for p in net.parameters()):,}")
     print(f"  Epsilon: {ckpt.get('epsilon', 'N/A')}, Steps: {ckpt.get('steps_done', 'N/A')}")
     return net
 
 
-def export_onnx(net: FactoredDuelingQNetwork, out_path: str):
+def export_onnx(net: torch.nn.Module, out_path: str):
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     dummy = torch.zeros(1, net.state_dim, dtype=torch.float32)
     torch.onnx.export(
@@ -56,7 +54,7 @@ def export_onnx(net: FactoredDuelingQNetwork, out_path: str):
     print(f"  Saved: {out_path} ({os.path.getsize(out_path)/1024:.1f} KB)")
 
 
-def verify(net: FactoredDuelingQNetwork, out_path: str):
+def verify(net: torch.nn.Module, out_path: str):
     try:
         import onnxruntime as ort
     except ImportError:

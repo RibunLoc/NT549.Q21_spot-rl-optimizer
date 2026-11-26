@@ -96,6 +96,24 @@ MAX_VCPU = MAX_INSTANCES * max(t.vcpus for t in INSTANCE_TYPES)    # 160
 MAX_JOBS = 100                                                     # queue cap
 MAX_WAIT = 10                                                      # max queue wait (steps)
 
+# ─── Observation v2 (sim.obs_version = 2) ─────────────────────────────────────
+# Global: 62 feature đầu của v1, BỎ 3 feature phụ thuộc thời điểm bắt đầu episode
+# (avg_wait cộng dồn [42], progress [47], budget_spent_ratio [53]) vì trên production
+# không có "đầu episode" → controller không tính được giá trị khớp lúc train.
+OBS_V1_DROP_FOR_V2 = (42, 47, 53)
+OBS_V2_GLOBAL_DIM = 62 - len(OBS_V1_DROP_FOR_V2)                   # 59
+# Per-pool block, xếp theo đúng thứ tự action (pool_idx = type_idx * N_AZS + az_idx):
+#   price_ratio/2, interrupt_risk, sps, price_cv/0.5, spot_count/MAX_PER_AZ,
+#   od_count/MAX_PER_AZ, cooldown/cooldown_steps, cpu_util, vcpus/8, od_price/max_od,
+#   az one-hot (N_AZS)
+OBS_V2_POOL_FEATS = 10 + N_AZS                                     # 13
+STATE_DIM_V2 = OBS_V2_GLOBAL_DIM + N_TYPES * N_AZS * OBS_V2_POOL_FEATS  # 254
+
+
+def state_dim_for(obs_version: int) -> int:
+    """State dim theo phiên bản observation."""
+    return STATE_DIM if obs_version == 1 else STATE_DIM_V2
+
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 def get_instance_type(idx: int) -> InstanceType:

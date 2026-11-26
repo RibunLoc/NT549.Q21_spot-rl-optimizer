@@ -1,9 +1,21 @@
 """
-Evaluate generalist DQN (best_mixed.pth) vs 6 baselines on 4 scenarios.
+Evaluate DQN generalist vs baselines trên 4 scenario, dùng CHUNG config với lúc train.
+
+Env (workload, reward, cooldown, interrupt model, obs version, max_steps) lấy từ --config,
+nên eval khớp đúng điều kiện train. Trước đây script tạo env không có reward_config
+(cooldown 2 thay vì 4) và workload mặc định khác notebook.
+
+Baseline chính để so sánh:
+  - Autoscaler-Spot: autoscaler target-vCPU, spot-first, fallback OD (giống ASG/Karpenter)
+  - Autoscaler-OD:   cùng logic nhưng chỉ dùng OD → mốc "tiết kiệm so với OD" công bằng
+Các baseline cũ (OnDemand, Spot, ...) giữ lại để so với số liệu cũ (--no-legacy-baselines để bỏ).
 
 Usage:
-    python experiments/evaluate_kaggle.py
-    python experiments/evaluate_kaggle.py --model results/kaggle/best_mixed.pth --episodes 30
+    python experiments/evaluate_kaggle.py --config experiments/configs/generalist/v41.yaml \
+        --model results/kaggle/best_mixed_v41.pth --output-dir results/eval/v41
+    # chỉ chạy baseline (không cần model):
+    python experiments/evaluate_kaggle.py --config experiments/configs/generalist/s3_interrupt_realistic.yaml \
+        --output-dir results/eval/s3_baselines
 """
 
 import argparse
@@ -12,208 +24,197 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-sys.path.append(str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from envs.spot_orchestrator_env import SpotOrchestratorEnv
-from envs.instance_catalog import STATE_DIM
-from envs.action_schema import N_ACTIONS, decode_action, OPERATION_NAMES
-from agents.dqn_agent import DQNAgent
-from agents.baselines import (
-    OnDemandAgent, SpotAgent, ThresholdAgent,
+from envs.action_schema import N_ACTIONS, decode_action, OPERATION_NAMES  # noqa: E402
+from agents.dqn_agent import DQNAgent  # noqa: E402
+from agents.baselines import (  # noqa: E402
+    AutoscalerAgent, OnDemandAgent, SpotAgent, ThresholdAgent,
     CheapestAZAgent, CheapestTypeAgent, RandomAgent,
 )
+from experiments.common import load_config, make_eval_env, scenario_paths, config_name  # noqa: E402
+
+DEFAULT_CONFIG = "experiments/configs/generalist/v41.yaml"
+REF_AGENT = "Autoscaler-OD"
 
 
-SCENARIOS = {
-    "stable":        "data/processed/multipool_stable.csv",
-    "volatile":      "data/processed/multipool_volatile.csv",
-    "spike":         "data/processed/multipool_spike.csv",
-    "az_divergence": "data/processed/multipool_az_divergence.csv",
-}
+class OnnxQAgent:
+    """Chạy file .onnx đã export (đúng artifact controller Go đang dùng) như một DQN greedy."""
 
-# v41 training dùng step_minutes=15 (672 steps = 1 tuần).
-# Eval phải khớp để episode chạy đủ 1 tuần workload.
-# Default workload:
-#   base_arrival_rate = 3.75  (= 15 job/h ÷ 4 vì step 15 phút)
-#   avg_job_duration  = 12    (= 3h × 4 vì step 15 phút)
-# Có thể override qua CLI để chạy ablation (vd: CI/CD job 15 phút thì duration=1).
-DEFAULT_WORKLOAD_CFG = {
-    "base_arrival_rate": 3.75,
-    "peak_multiplier":   2.0,
-    "avg_job_duration":  12,
-}
+    def __init__(self, path: str):
+        import onnxruntime as ort
+        self.sess = ort.InferenceSession(path)
+        inp = self.sess.get_inputs()[0]
+        self.input_name = inp.name
+        self.state_dim = int(inp.shape[1])
+
+    def select_action(self, state, training: bool = False, action_mask=None) -> int:
+        q = self.sess.run(None, {self.input_name: np.asarray(state, dtype=np.float32)[None, :]})[0][0]
+        if action_mask is not None:
+            q = np.where(action_mask, q, -np.inf)
+        return int(np.argmax(q))
 
 
-def make_env(scenario: str, seed: int = 0,
-             workload_cfg: dict = None,
-             max_steps: int = 672) -> SpotOrchestratorEnv:
-    return SpotOrchestratorEnv(
-        data_path=SCENARIOS[scenario],
-        max_steps=max_steps,
-        workload_config=workload_cfg or DEFAULT_WORKLOAD_CFG,
-        seed=seed,
-    )
-
-
-def load_dqn(model_path: str, device: str = "cpu") -> DQNAgent:
+def load_dqn(model_path: str, device: str = "cpu"):
+    if model_path.endswith(".onnx"):
+        agent = OnnxQAgent(model_path)
+        print(f"Loaded ONNX model | state={agent.state_dim}")
+        return agent
     import torch
     ckpt = torch.load(model_path, map_location=device, weights_only=False)
-
+    sd = ckpt["q_network_state_dict"]
     network_type = ckpt.get("network_type")
-    hidden_dim   = ckpt.get("hidden_dim")
-
+    hidden_dim = ckpt.get("hidden_dim")
     if network_type is None:
-        sd = ckpt["q_network_state_dict"]
         if "trunk.0.weight" in sd:
             network_type = "factored"
-            hidden_dim   = hidden_dim or sd["trunk.0.weight"].shape[0]
+            hidden_dim = hidden_dim or sd["trunk.0.weight"].shape[0]
         elif "feature.0.weight" in sd:
             network_type = "dueling"
-            hidden_dim   = hidden_dim or sd["feature.0.weight"].shape[0]
+            hidden_dim = hidden_dim or sd["feature.0.weight"].shape[0]
         else:
             raise RuntimeError(f"Unknown checkpoint format. Keys: {list(sd.keys())[:5]}")
 
-    state_dim  = ckpt.get("state_dim",  STATE_DIM)
+    state_dim = ckpt.get("state_dim")
+    if state_dim is None:
+        from envs.instance_catalog import STATE_DIM
+        state_dim = STATE_DIM
     action_dim = ckpt.get("action_dim", N_ACTIONS)
 
     agent = DQNAgent(
         state_dim=state_dim, action_dim=action_dim,
-        hidden_dim=hidden_dim, network_type=network_type,
+        hidden_dim=hidden_dim or 512, network_type=network_type,
         epsilon_start=0.0, epsilon_end=0.0, epsilon_decay=1,
-        device=device,
+        use_per=False, buffer_size=1, device=device,
     )
-    agent.load(model_path)
-    print(f"Loaded {network_type} net | state={state_dim} action={action_dim} hidden={hidden_dim}")
+    agent.q_network.load_state_dict(sd)
+    agent.q_network.eval()
+    print(f"Loaded {network_type} net | state={state_dim} action={action_dim} hidden={hidden_dim} "
+          f"| train steps={ckpt.get('steps_done')} lr_schedule={ckpt.get('lr_schedule', 'step (legacy)')}")
     return agent
 
 
-def run_episode(env, agent, use_mask: bool = False) -> dict:
+def run_episode(env, agent, is_dqn: bool) -> dict:
     obs, info = env.reset()
     total_reward = 0.0
-    total_cost   = 0.0
+    interruptions = 0
     action_counts = np.zeros(N_ACTIONS, dtype=int)
 
     while True:
-        if hasattr(agent, "replay_buffer"):  # DQNAgent
-            mask   = env.get_action_mask() if use_mask else None
+        mask = env.get_action_mask()
+        if is_dqn:
             action = agent.select_action(obs, training=False, action_mask=mask)
         else:
-            action = agent.select_action(obs, info)
-
+            action = agent.select_action(obs, dict(info, action_mask=mask))
         action_counts[action] += 1
         obs, reward, term, trunc, info = env.step(action)
         total_reward += reward
-        total_cost   += info.get("step_cost", 0.0)
-
+        interruptions += int(info.get("step_interruptions", 0))
         if term or trunc:
             break
 
     return {
-        "total_reward":   float(total_reward),
-        "total_cost":     float(info.get("cost", total_cost)),
-        "sla_rate":       float(info.get("sla_compliance", 0.0)),
-        "failed_jobs":    int(info.get("failed_jobs", 0)),
+        "total_reward": float(total_reward),
+        "total_cost": float(info.get("cost", 0.0)),
+        "sla_rate": float(info.get("sla_compliance", 0.0)),
+        "failed_jobs": int(info.get("failed_jobs", 0)),
         "completed_jobs": int(info.get("completed_jobs", 0)),
-        "action_counts":  action_counts,
+        "interruptions": interruptions,
+        "action_counts": action_counts,
     }
 
 
-def evaluate(agent, scenario: str, n_episodes: int, use_mask: bool = False,
-             workload_cfg: dict = None, max_steps: int = 672) -> dict:
+def evaluate(agent, cfg: dict, scenario: str, n_episodes: int, is_dqn: bool) -> dict:
+    e = cfg.get("eval", {})
+    seed_base, stride = int(e.get("seed_base", 42)), int(e.get("seed_stride", 7))
     results = []
     ac_total = np.zeros(N_ACTIONS, dtype=int)
-
     for ep in range(n_episodes):
-        env = make_env(scenario, seed=ep * 7 + 42,
-                       workload_cfg=workload_cfg, max_steps=max_steps)
-        r   = run_episode(env, agent, use_mask)
+        if hasattr(agent, "reset"):
+            agent.reset()
+        env = make_eval_env(cfg, scenario, seed=seed_base + ep * stride)
+        r = run_episode(env, agent, is_dqn)
         results.append(r)
         ac_total += r["action_counts"]
 
     rewards = [r["total_reward"] for r in results]
-    costs   = [r["total_cost"]   for r in results]
-    slas    = [r["sla_rate"]     for r in results]
-
+    costs = [r["total_cost"] for r in results]
+    slas = [r["sla_rate"] for r in results]
+    hold_pct = 0.0
+    if ac_total.sum() > 0:
+        hold_pct = float(ac_total[-1] / ac_total.sum() * 100)
     return {
         "avg_reward": float(np.mean(rewards)),
         "std_reward": float(np.std(rewards)),
-        "avg_cost":   float(np.mean(costs)),
-        "std_cost":   float(np.std(costs)),
-        "avg_sla":    float(np.mean(slas)),
-        "episode_costs":   costs,
-        "episode_rewards": rewards,
-        "action_counts":   ac_total,
+        "avg_cost": float(np.mean(costs)),
+        "std_cost": float(np.std(costs)),
+        "avg_sla": float(np.mean(slas)),
+        "min_sla": float(np.min(slas)),
+        "avg_failed_jobs": float(np.mean([r["failed_jobs"] for r in results])),
+        "avg_interruptions": float(np.mean([r["interruptions"] for r in results])),
+        "hold_pct": hold_pct,
+        "episode_costs": costs,
+        "action_counts": ac_total,
     }
 
 
-def print_table(all_results: dict):
-    """Print markdown-style summary table."""
-    scenarios = list(all_results.keys())
-    agents    = list(all_results[scenarios[0]].keys())
+def _savings(ref_cost: float, cost: float) -> float:
+    return (ref_cost - cost) / ref_cost * 100 if ref_cost > 0 else 0.0
 
-    header = f"{'Agent':<16}" + "".join(
-        f" {'Cost '+s:>14} {'SLA '+s:>8}" for s in scenarios
-    )
+
+def print_table(all_results: dict, ref: str):
+    scenarios = list(all_results.keys())
+    agents = list(all_results[scenarios[0]].keys())
+    header = f"{'Agent':<16}" + "".join(f" {'Cost ' + s[:8]:>14} {'SLA':>6} {'vs ' + ref[-2:]:>7}" for s in scenarios)
     print("\n" + "=" * len(header))
     print(header)
     print("-" * len(header))
-
     for a in agents:
         row = f"{a:<16}"
         for s in scenarios:
             m = all_results[s][a]
-            row += f"  ${m['avg_cost']:>8.1f}±{m['std_cost']:.0f}   {m['avg_sla']*100:>5.1f}%"
+            sv = _savings(all_results[s][ref]["avg_cost"], m["avg_cost"]) if ref in all_results[s] else 0.0
+            row += f"  ${m['avg_cost']:>8.1f}±{m['std_cost']:<3.0f} {m['avg_sla']*100:>5.1f}% {sv:>+6.1f}%"
         print(row)
-
-    # Savings row
-    print("-" * len(header))
-    od_costs = {s: all_results[s]["OnDemand"]["avg_cost"] for s in scenarios}
-    dqn_row  = f"{'DQN savings':16}"
-    for s in scenarios:
-        dqn_cost = all_results[s]["DQN"]["avg_cost"]
-        pct = (od_costs[s] - dqn_cost) / od_costs[s] * 100 if od_costs[s] > 0 else 0
-        dqn_row += f"  {'vs OD: ':>9}{pct:+.1f}%    {'':>5}"
-    print(dqn_row)
     print("=" * len(header))
+    print(f"'vs {ref[-2:]}' = % tiết kiệm so với {ref}. Chỉ so sánh agent có SLA ≥ 95%.")
 
 
-def plot_comparison(all_results: dict, out_dir: Path):
-    """4-scenario × 2-metric grid: cost + SLA bars."""
+def plot_comparison(all_results: dict, out_dir: Path, title: str):
     scenarios = list(all_results.keys())
-    agents    = list(all_results[scenarios[0]].keys())
-    colors    = ["#2196F3", "#4CAF50", "#FF9800", "#F44336", "#9C27B0", "#795548", "#00BCD4"]
+    agents = list(all_results[scenarios[0]].keys())
+    colors = plt.cm.tab10(np.linspace(0, 1, max(len(agents), 2)))
 
-    fig, axes = plt.subplots(2, len(scenarios), figsize=(5 * len(scenarios), 9))
-    fig.suptitle("DQN Generalist vs Baselines — 4 Scenarios", fontsize=14, fontweight="bold")
-
+    fig, axes = plt.subplots(2, len(scenarios), figsize=(5 * len(scenarios), 9), squeeze=False)
+    fig.suptitle(title, fontsize=14, fontweight="bold")
     for col, scn in enumerate(scenarios):
         costs = [all_results[scn][a]["avg_cost"] for a in agents]
-        slas  = [all_results[scn][a]["avg_sla"]  for a in agents]
-        x     = np.arange(len(agents))
+        slas = [all_results[scn][a]["avg_sla"] for a in agents]
+        x = np.arange(len(agents))
 
-        # Cost
         ax = axes[0, col]
         bars = ax.bar(x, costs, color=colors[:len(agents)])
         ax.set_title(f"[{scn}] Cost ($)", fontsize=11)
-        ax.set_xticks(x); ax.set_xticklabels(agents, rotation=30, ha="right", fontsize=8)
+        ax.set_xticks(x); ax.set_xticklabels(agents, rotation=35, ha="right", fontsize=8)
         ax.set_ylabel("Avg Cost / Episode ($)")
         for bar, v in zip(bars, costs):
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                    f"${v:.0f}", ha="center", va="bottom", fontsize=8)
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"${v:.0f}",
+                    ha="center", va="bottom", fontsize=7)
 
-        # SLA
         ax2 = axes[1, col]
         bars2 = ax2.bar(x, [s * 100 for s in slas], color=colors[:len(agents)])
         ax2.set_title(f"[{scn}] SLA (%)", fontsize=11)
-        ax2.set_xticks(x); ax2.set_xticklabels(agents, rotation=30, ha="right", fontsize=8)
+        ax2.set_xticks(x); ax2.set_xticklabels(agents, rotation=35, ha="right", fontsize=8)
         ax2.set_ylabel("SLA Compliance (%)")
         ax2.set_ylim(0, 105)
         ax2.axhline(95, color="red", linestyle="--", linewidth=1, alpha=0.7)
         for bar, v in zip(bars2, slas):
-            ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5,
-                     f"{v*100:.1f}%", ha="center", va="bottom", fontsize=8)
+            ax2.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.5, f"{v*100:.1f}%",
+                     ha="center", va="bottom", fontsize=7)
 
     plt.tight_layout()
     path = out_dir / "comparison_all_scenarios.png"
@@ -223,33 +224,28 @@ def plot_comparison(all_results: dict, out_dir: Path):
 
 
 def plot_action_dist(action_counts: np.ndarray, out_dir: Path):
-    """DQN operation usage breakdown."""
-    from envs.action_schema import N_POOL_OPS, N_POOLS, HOLD_ACTION
-
+    from envs.action_schema import N_POOL_OPS, HOLD_ACTION
     op_counts = np.zeros(N_POOL_OPS + 1, dtype=int)
     for idx, cnt in enumerate(action_counts):
         if idx == HOLD_ACTION:
             op_counts[N_POOL_OPS] += cnt
         else:
             op, _, _ = decode_action(idx)
-            if 0 <= op < N_POOL_OPS:
-                op_counts[op] += cnt
-
-    labels = list(OPERATION_NAMES) if not isinstance(OPERATION_NAMES, dict) else list(OPERATION_NAMES.values())
-    total  = op_counts.sum()
-    pcts   = op_counts / total * 100 if total > 0 else op_counts
+            op_counts[op] += cnt
+    labels = list(OPERATION_NAMES)
+    total = op_counts.sum()
+    pcts = op_counts / total * 100 if total > 0 else op_counts
 
     fig, ax = plt.subplots(figsize=(12, 4))
-    bars = ax.bar(range(len(labels)), pcts,
-                  color=plt.cm.tab10(np.linspace(0, 1, len(labels))))
+    bars = ax.bar(range(len(labels)), pcts, color=plt.cm.tab10(np.linspace(0, 1, len(labels))))
     ax.set_xticks(range(len(labels)))
     ax.set_xticklabels(labels, rotation=30, ha="right")
     ax.set_ylabel("Action frequency (%)")
     ax.set_title("DQN Action Distribution (all scenarios)")
     for bar, v in zip(bars, pcts):
         if v > 0.5:
-            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                    f"{v:.1f}%", ha="center", va="bottom", fontsize=8)
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{v:.1f}%",
+                    ha="center", va="bottom", fontsize=8)
     plt.tight_layout()
     path = out_dir / "dqn_action_dist.png"
     plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -257,28 +253,25 @@ def plot_action_dist(action_counts: np.ndarray, out_dir: Path):
     print(f"Saved: {path}")
 
 
-def plot_savings_heatmap(all_results: dict, out_dir: Path):
-    """Cost savings % vs OnDemand — DQN vs all baselines × all scenarios."""
+def plot_savings_heatmap(all_results: dict, out_dir: Path, ref: str):
     scenarios = list(all_results.keys())
-    agents    = [a for a in all_results[scenarios[0]].keys() if a != "OnDemand"]
-
+    agents = [a for a in all_results[scenarios[0]].keys() if a != ref]
     matrix = np.zeros((len(agents), len(scenarios)))
     for j, scn in enumerate(scenarios):
-        od = all_results[scn]["OnDemand"]["avg_cost"]
+        ref_cost = all_results[scn][ref]["avg_cost"]
         for i, ag in enumerate(agents):
-            c = all_results[scn][ag]["avg_cost"]
-            matrix[i, j] = (od - c) / od * 100 if od > 0 else 0
+            matrix[i, j] = _savings(ref_cost, all_results[scn][ag]["avg_cost"])
 
     fig, ax = plt.subplots(figsize=(len(scenarios) * 2 + 2, len(agents) * 0.8 + 1.5))
     im = ax.imshow(matrix, cmap="RdYlGn", vmin=-20, vmax=60)
     ax.set_xticks(range(len(scenarios))); ax.set_xticklabels(scenarios, fontsize=10)
-    ax.set_yticks(range(len(agents)));    ax.set_yticklabels(agents, fontsize=10)
-    ax.set_title("Cost Savings vs OnDemand (%)\n(green = cheaper than OnDemand)", fontsize=12)
+    ax.set_yticks(range(len(agents))); ax.set_yticklabels(agents, fontsize=10)
+    ax.set_title(f"Cost Savings vs {ref} (%)", fontsize=12)
     plt.colorbar(im, ax=ax, label="Savings %")
     for i in range(len(agents)):
         for j in range(len(scenarios)):
-            ax.text(j, i, f"{matrix[i,j]:+.1f}%", ha="center", va="center", fontsize=9,
-                    color="black" if abs(matrix[i,j]) < 40 else "white")
+            ax.text(j, i, f"{matrix[i, j]:+.1f}%", ha="center", va="center", fontsize=9,
+                    color="black" if abs(matrix[i, j]) < 40 else "white")
     plt.tight_layout()
     path = out_dir / "savings_heatmap.png"
     plt.savefig(path, dpi=150, bbox_inches="tight")
@@ -288,99 +281,86 @@ def plot_savings_heatmap(all_results: dict, out_dir: Path):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model",      default="results/kaggle/best_mixed.pth")
-    parser.add_argument("--episodes",   type=int, default=30)
+    parser.add_argument("--config", default=DEFAULT_CONFIG,
+                        help="Config dùng lúc train (env/workload/reward/sim lấy từ đây)")
+    parser.add_argument("--model", default=None,
+                        help="Checkpoint DQN (.pth) hoặc model đã export (.onnx); bỏ trống = chỉ chạy baseline")
+    parser.add_argument("--episodes", type=int, default=None, help="Mặc định = eval.episodes trong config")
+    parser.add_argument("--scenarios", default=None, help="vd: stable,spike (mặc định: tất cả)")
     parser.add_argument("--output-dir", default="results/kaggle/eval")
-    parser.add_argument("--device",     default="cpu")
-    # Workload knobs — default khớp training v41 (3h job, 15 job/h).
-    # Để eval khớp training v42 (in-distribution), dùng:
-    #   --base-arrival-rate 10 --avg-job-duration 3 --peak-multiplier 1.4
-    #   --spike-probability 0.02 --spike-multiplier 2.0
-    parser.add_argument("--max-steps",          type=int,   default=672,
-                        help="Số step/episode (default 672)")
-    parser.add_argument("--base-arrival-rate",  type=float, default=3.75,
-                        help="Job/step trung bình")
-    parser.add_argument("--peak-multiplier",    type=float, default=2.0)
-    parser.add_argument("--avg-job-duration",   type=int,   default=12,
-                        help="Số step trung bình của 1 job")
-    parser.add_argument("--spike-probability",  type=float, default=0.02,
-                        help="Xác suất spike workload mỗi step")
-    parser.add_argument("--spike-multiplier",   type=float, default=2.0,
-                        help="Hệ số nhân arrival rate khi có spike")
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--no-legacy-baselines", action="store_true",
+                        help="Bỏ các baseline cũ (OnDemand, Spot, Threshold, ...)")
     args = parser.parse_args()
 
-    workload_cfg = {
-        "base_arrival_rate": args.base_arrival_rate,
-        "peak_multiplier":   args.peak_multiplier,
-        "avg_job_duration":  args.avg_job_duration,
-        "spike_probability": args.spike_probability,
-        "spike_multiplier":  args.spike_multiplier,
-    }
-
+    cfg = load_config(args.config)
+    n_eps = args.episodes or int(cfg.get("eval", {}).get("episodes", 30))
+    scenarios = list(scenario_paths(cfg).keys())
+    if args.scenarios:
+        scenarios = [s.strip() for s in args.scenarios.split(",")]
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Model: {args.model}")
-    print(f"Episodes per scenario: {args.episodes}")
-    print(f"max_steps={args.max_steps}, workload={workload_cfg}")
+    print(f"Config: {cfg['_config_path']} ({config_name(cfg)})")
+    print(f"Model: {args.model or '(none — baselines only)'} | episodes/scenario={n_eps}")
+    print(f"env.sim={cfg['env'].get('sim', {})} reward.mode={cfg['env'].get('reward', {}).get('mode', 'shaped')}")
 
-    dqn = load_dqn(args.model, device=args.device)
-
-    AGENTS = {
-        "DQN":          (dqn,                             True),
-        "OnDemand":     (OnDemandAgent(target_capacity=8), False),
-        "Spot":         (SpotAgent(target_capacity=8),     False),
-        "Threshold":    (ThresholdAgent(),                 False),
-        "CheapestAZ":   (CheapestAZAgent(),               False),
-        "CheapestType": (CheapestTypeAgent(),              False),
-        "Random":       (RandomAgent(seed=0),              False),
-    }
+    agents = {}
+    if args.model:
+        dqn = load_dqn(args.model, device=args.device)
+        env_dim = make_eval_env(cfg, scenarios[0], seed=0).observation_space.shape[0]
+        if dqn.state_dim != env_dim:
+            raise SystemExit(
+                f"Model state_dim={dqn.state_dim} nhưng env (obs_version="
+                f"{cfg['env'].get('sim', {}).get('obs_version', 1)}) cho {env_dim}. "
+                f"Dùng đúng config mà model được train."
+            )
+        agents["DQN"] = (dqn, True)
+    agents["Autoscaler-Spot"] = (AutoscalerAgent(use_spot=True), False)
+    agents["Autoscaler-OD"] = (AutoscalerAgent(use_spot=False), False)
+    if not args.no_legacy_baselines:
+        agents.update({
+            "OnDemand": (OnDemandAgent(target_capacity=8), False),
+            "Spot": (SpotAgent(target_capacity=8), False),
+            "Threshold": (ThresholdAgent(), False),
+            "CheapestAZ": (CheapestAZAgent(), False),
+            "CheapestType": (CheapestTypeAgent(), False),
+            "Random": (RandomAgent(seed=0), False),
+        })
 
     all_results = {}
-    ac_combined = np.zeros(N_ACTIONS, dtype=int)
-
-    for scn in SCENARIOS:
-        print(f"\n{'='*60}\nScenario: {scn}\n{'='*60}")
+    ac_dqn = np.zeros(N_ACTIONS, dtype=int)
+    for scn in scenarios:
+        print(f"\n{'=' * 60}\nScenario: {scn}\n{'=' * 60}")
         scn_res = {}
-
-        for name, (agent, use_mask) in AGENTS.items():
-            if hasattr(agent, "reset"):
-                agent.reset()
-            print(f"  [{name}] evaluating {args.episodes} episodes...")
-            res = evaluate(agent, scn, args.episodes, use_mask,
-                           workload_cfg=workload_cfg, max_steps=args.max_steps)
+        for name, (agent, is_dqn) in agents.items():
+            res = evaluate(agent, cfg, scn, n_eps, is_dqn)
             scn_res[name] = res
-            print(f"    cost=${res['avg_cost']:.1f}±{res['std_cost']:.0f}  "
-                  f"SLA={res['avg_sla']*100:.1f}%  "
-                  f"reward={res['avg_reward']:.1f}")
-
+            print(f"  {name:<16} cost=${res['avg_cost']:8.1f}±{res['std_cost']:<4.0f} "
+                  f"SLA={res['avg_sla']*100:5.1f}% (min {res['min_sla']*100:5.1f}%) "
+                  f"interrupts/ep={res['avg_interruptions']:6.1f} HOLD={res['hold_pct']:4.1f}%")
         all_results[scn] = scn_res
-        ac_combined += scn_res["DQN"]["action_counts"]
+        if "DQN" in scn_res:
+            ac_dqn += scn_res["DQN"]["action_counts"]
 
-        od  = scn_res["OnDemand"]["avg_cost"]
-        dqn_c = scn_res["DQN"]["avg_cost"]
-        print(f"  >> DQN saves {(od-dqn_c)/od*100:.1f}% vs OnDemand  (${od:.1f} -> ${dqn_c:.1f})")
+    print_table(all_results, REF_AGENT)
+    plot_comparison(all_results, out_dir, f"{config_name(cfg)} — DQN vs baselines")
+    plot_savings_heatmap(all_results, out_dir, REF_AGENT)
+    if ac_dqn.sum() > 0:
+        plot_action_dist(ac_dqn, out_dir)
 
-    print_table(all_results)
-    plot_comparison(all_results, out_dir)
-    plot_action_dist(ac_combined, out_dir)
-    plot_savings_heatmap(all_results, out_dir)
-
-    # JSON summary
-    summary = {}
-    for scn, agents in all_results.items():
-        summary[scn] = {}
-        for name, res in agents.items():
-            summary[scn][name] = {
-                k: v for k, v in res.items()
-                if not isinstance(v, (np.ndarray, list))
+    summary = {"config": config_name(cfg), "config_path": cfg["_config_path"],
+               "model": args.model, "episodes": n_eps, "reference": REF_AGENT, "scenarios": {}}
+    for scn, res in all_results.items():
+        ref_cost = res[REF_AGENT]["avg_cost"]
+        summary["scenarios"][scn] = {
+            name: {
+                **{k: v for k, v in r.items() if not isinstance(v, (np.ndarray, list))},
+                "savings_vs_autoscaler_od_pct": _savings(ref_cost, r["avg_cost"]),
             }
-        od = summary[scn]["OnDemand"]["avg_cost"]
-        summary[scn]["DQN"]["savings_vs_ondemand_pct"] = (
-            (od - summary[scn]["DQN"]["avg_cost"]) / od * 100 if od > 0 else 0
-        )
-
-    with open(out_dir / "eval_summary.json", "w") as f:
+            for name, r in res.items()
+        }
+    with open(out_dir / "eval_summary.json", "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
     print(f"\nSummary: {out_dir / 'eval_summary.json'}")
 

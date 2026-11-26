@@ -59,6 +59,10 @@ logs/
 # TensorBoard
 runs/
 
+# MLflow local store (dùng MLflow server, không commit local DB)
+mlruns/
+mlflow.db
+
 # AWS credentials
 .aws/
 *.pem
