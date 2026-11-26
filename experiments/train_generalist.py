@@ -300,11 +300,13 @@ def train(
 
     if run_ctx and best_cost is not None:
         try:
-            mv = mlflow.register_model(f"runs:/{run_ctx.info.run_id}/models/best_eval.pth", "Spot-RL-Agent")
-            client = mlflow.tracking.MlflowClient()
-            client.set_model_version_tag(mv.name, mv.version, "avg_cost", f"{best_cost:.1f}")
-            client.set_model_version_tag(mv.name, mv.version, "avg_sla", f"{best_sla:.3f}")
-            client.set_model_version_tag(mv.name, mv.version, "version", version)
+            # MLflow 3: register_model("runs:/...") đòi logged model → dùng create_model_version
+            from experiments.mlflow_registry import register_artifact
+            mv = register_artifact(
+                mlflow.tracking.MlflowClient(), "Spot-RL-Agent",
+                run_id=run_ctx.info.run_id, artifact_path="models/best_eval.pth",
+                tags={"avg_cost": f"{best_cost:.1f}", "avg_sla": f"{best_sla:.3f}", "version": version},
+            )
             print(f"Registered: Spot-RL-Agent v{mv.version}")
         except Exception as e:
             print(f"Model Registry skipped: {e}")

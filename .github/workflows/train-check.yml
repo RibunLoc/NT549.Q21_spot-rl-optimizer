@@ -24,9 +24,10 @@ permissions:
 env:
   KAGGLE_USERNAME: ${{ secrets.KAGGLE_USERNAME }}
   KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}   # Kaggle CLI 2.x, xem train-submit.yml
-  MLFLOW_TRACKING_URI: https://mlflow.holoc.id.vn
-  MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
-  MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+  # MLflow host trên DagsHub: basic auth, user = owner repo, password = DagsHub token
+  MLFLOW_TRACKING_URI: https://dagshub.com/RibunLoc/NT549.Q21_spot-rl-optimizer.mlflow
+  MLFLOW_TRACKING_USERNAME: RibunLoc
+  MLFLOW_TRACKING_PASSWORD: ${{ secrets.DAGSHUB_USER_TOKEN }}
   MLFLOW_EXPERIMENT: spot-rl-generalist
   KAGGLE_KERNEL_SLUG: reinforcement-learning-spot-instance-aws   # giống train-submit.yml
 
