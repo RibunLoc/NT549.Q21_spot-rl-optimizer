@@ -53,6 +53,18 @@ jobs:
           pip install kaggle six
           kaggle --version
 
+      # Secret dán lỡ dính dấu cách / xuống dòng → slug thành "user /..." → Permission denied
+      - name: Check Kaggle credentials
+        run: |
+          if [[ "$KAGGLE_USERNAME" =~ [[:space:]] || -z "$KAGGLE_USERNAME" ]]; then
+            echo "::error::Secret KAGGLE_USERNAME rỗng hoặc có dấu cách/xuống dòng. Tạo lại secret."; exit 1
+          fi
+          if [[ "$KAGGLE_KEY" =~ [[:space:]] || -z "$KAGGLE_KEY" ]]; then
+            echo "::error::Secret KAGGLE_KEY rỗng hoặc có dấu cách/xuống dòng. Tạo lại secret."; exit 1
+          fi
+          echo "Notebook của tài khoản này (cột ref = owner/slug):"
+          kaggle kernels list --mine --page-size 50
+
       - name: Validate config path
         env:
           CONFIG: ${{ inputs.config }}
